@@ -1,5 +1,5 @@
 {
-  "name": "tree-ast-grep-mcp",
+  "name": "tree-grep-mcp",
   "version": "1.0.16",
   "description": "Simple, direct ast-grep wrapper for AI coding agents. Zero abstractions, maximum performance.",
   "main": "./build/index.js",
@@ -9,28 +9,12 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
+    "build:bun": "bun build src/index.ts --outdir build --target node --format esm && tsc --emitDeclarationOnly",
     "dev": "tsx src/index.ts",
+    "dev:bun": "bun --watch src/index.ts",
     "clean": "rm -rf build",
     "prepublishOnly": "npm run build",
-    "test": "vitest run",
-    "test:unit": "node tests/runner.js --unit",
-    "test:integration": "node tests/runner.js --integration",
-    "test:e2e": "node tests/runner.js --e2e",
-    "test:stress": "node tests/runner.js --stress",
-    "test:security": "node tests/runner.js --security",
-    "test:real-world": "node tests/runner.js --real-world",
-    "test:complex": "node tests/runner.js --complex",
-    "test:all": "node tests/runner.js --all",
-    "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage",
-    "test:mcp": "node tests/mcp-runner.js --integration --mcp-report",
-    "test:mcp-all": "node tests/mcp-runner.js --all --mcp-report",
-    "test:mcp-watch": "node tests/mcp-runner.js --integration --watch --mcp-report",
-    "test:mcp-protocol": "node tests/scripts/cli-comprehensive-tests.js",
-    "test:mcp-inspector": "npx @modelcontextprotocol/inspector build/index.js --auto-install",
-    "demo:mcp": "node mcp-demo.js",
-    "pretest:integration": "node ./scripts/install-astgrep.js",
-    "test:integration:vitest": "cross-env AST_GREP_AVAILABLE=1 vitest run"
+    "test:bun": "bun test"
   },
   "keywords": [
     "mcp",
@@ -47,34 +31,32 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/justar96/tree-ast-grep-mcp.git"
+    "url": "git+https://github.com/justar96/tree-grep-mcp.git"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
-    "zod": "^3.22.4"
+    "@modelcontextprotocol/sdk": "^1.20.2",
+    "zod": "^4.1.12"
   },
   "devDependencies": {
-  "cross-env": "^7.0.3",
-    "@types/node": "^20.0.0",
-    "c8": "^8.0.1",
-    "tsx": "^4.0.0",
-    "typescript": "^5.0.0",
-    "vitest": "^3.2.4"
+    "cross-env": "^10.1.0",
+    "@types/node": "^24.10.0",
+    "c8": "^10.1.3",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=18.0.0",
+    "bun": ">=1.0.0"
   },
-  "optionalDependencies": {
-    "tree-ast-grep-mcp-darwin": "^1.0.0",
-    "tree-ast-grep-mcp-linux": "^1.0.0",
-    "tree-ast-grep-mcp-win32": "^1.0.0"
-  },
+  "trustedDependencies": [
+    "@modelcontextprotocol/sdk"
+  ],
   "mcpServers": {
     "tree-ast-grep": {
       "command": "npx",
       "args": [
         "-y",
-        "tree-ast-grep-mcp",
+        "tree-grep-mcp",
         "--auto-install"
       ]
     }

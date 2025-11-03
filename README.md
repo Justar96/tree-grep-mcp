@@ -11,7 +11,19 @@ Add to your MCP settings:
   "mcpServers": {
     "tree-ast-grep": {
       "command": "npx",
-      "args": ["-y", "tree-ast-grep-mcp", "--auto-install"]
+      "args": ["-y", "tree-grep-mcp", "--auto-install"]
+    }
+  }
+}
+```
+
+**Using Bun (for development):**
+```json
+{
+  "mcpServers": {
+    "tree-ast-grep": {
+      "command": "bunx",
+      "args": ["tree-grep-mcp", "--auto-install"]
     }
   }
 }
@@ -96,8 +108,18 @@ Patterns work exactly like ast-grep CLI:
 # Run unit suites via Vitest adapter (fast)
 npm test
 
+# Using Bun (faster)
+bun test
+# or
+npm run test:bun
+
 # Watch mode
 npm run test:watch
+
+# Run specific test suites
+npm run test:unit          # Node.js
+npm run test:unit:bun      # Bun
+npm run test:integration:bun
 
 # Integration/e2e via adapter (requires ast-grep availability)
 $env:AST_GREP_AVAILABLE="1"; npm test   # PowerShell
@@ -121,13 +143,13 @@ ast-grep scan --rule rule.yml file.js
 
 ```bash
 # Lightweight (requires system ast-grep)
-npx tree-ast-grep-mcp --use-system
+npx tree-grep-mcp --use-system
 
 # Platform-specific binary
-npx tree-ast-grep-mcp --platform=win32
+npx tree-grep-mcp --platform=win32
 
 # Auto-detect platform (recommended)
-npx tree-ast-grep-mcp --auto-install
+npx tree-grep-mcp --auto-install
 ```
 
 ## 📝 Metavariable Guide
@@ -190,6 +212,24 @@ npm run test:mcp-all
 - Enhanced debugging with inspection data
 
 See [`docs/MCP_INSPECTOR.md`](docs/MCP_INSPECTOR.md) for detailed documentation.
+
+## 🚀 Development
+
+This project supports both **Node.js** (for users) and **Bun** (for developers):
+
+```bash
+# Quick start with Bun (recommended for development)
+bun install
+bun run dev:bun
+bun test
+
+# Or use Node.js (works everywhere)
+npm install
+npm run dev
+npm test
+```
+
+See [DEVELOPMENT.md](DEVELOPMENT.md) for detailed setup and performance comparison.
 
 ## 🤝 Contributing
 

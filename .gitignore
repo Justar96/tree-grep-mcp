@@ -5,12 +5,15 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 .pnpm-store/
+bun.lockb
+.bun-cache/
 
 # Build outputs
 dist/
 build/
 *.js.map
 *.d.ts.map
+
 
 # Testing
 coverage/

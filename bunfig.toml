@@ -1,0 +1,17 @@
+# Bun configuration
+[install]
+# Cache packages for faster installs
+cache = { dir = ".bun-cache" }
+
+[install.scopes]
+# Trust all scopes by default
+"@modelcontextprotocol" = { registry = "https://registry.npmjs.org/" }
+
+[test]
+# Test configuration
+preload = ["./tests/setup.js"]
+coverage = true
+
+[run]
+# Bun runtime settings
+shell = "bun"
