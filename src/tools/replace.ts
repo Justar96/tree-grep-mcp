@@ -1,6 +1,7 @@
 import { AstGrepBinaryManager } from '../core/binary-manager.js';
 import { WorkspaceManager } from '../core/workspace-manager.js';
 import { ValidationError, ExecutionError } from '../types/errors.js';
+import { PatternValidator, ParameterValidator } from '../utils/validation.js';
 
 /**
  * Direct replace tool that calls ast-grep run --rewrite with minimal overhead
@@ -12,19 +13,63 @@ export class ReplaceTool {
   ) {}
 
   async execute(params: any): Promise<any> {
-    // Basic validation - only what's absolutely necessary
+    // Validate pattern
     if (!params.pattern || typeof params.pattern !== 'string') {
-      throw new ValidationError('Pattern is required');
-    }
-    if (!params.replacement) {
-      throw new ValidationError('Replacement is required');
+      throw new ValidationError('Pattern is required and must be a string');
     }
 
-    // Guardrail: discourage bare $$$ which ast-grep doesn't expand in rewrite
-    const hasBareMultiInPattern = /\$\$\$(?![A-Za-z_][A-Za-z0-9_]*)/.test(params.pattern);
-    const hasBareMultiInReplacement = /\$\$\$(?![A-Za-z_][A-Za-z0-9_]*)/.test(params.replacement);
-    if (hasBareMultiInPattern || hasBareMultiInReplacement) {
-      throw new ValidationError('Use named multi-node metavariables like $$$BODY instead of bare $$$ in pattern/replacement');
+    const patternValidation = PatternValidator.validatePattern(params.pattern);
+    if (!patternValidation.valid) {
+      throw new ValidationError(
+        `Invalid pattern: ${patternValidation.errors.join('; ')}`,
+        { errors: patternValidation.errors }
+      );
+    }
+
+    // Validate replacement
+    if (!params.replacement || typeof params.replacement !== 'string') {
+      throw new ValidationError('Replacement is required and must be a string');
+    }
+
+    const replacementValidation = PatternValidator.validatePattern(params.replacement);
+    if (!replacementValidation.valid) {
+      throw new ValidationError(
+        `Invalid replacement: ${replacementValidation.errors.join('; ')}`,
+        { errors: replacementValidation.errors }
+      );
+    }
+
+    // Validate metavariable consistency between pattern and replacement
+    // This ensures all metavariables used in replacement are defined in pattern
+    // Example: pattern="foo($A)" with replacement="bar($B)" will fail
+    // Unused pattern metavariables generate warnings (may be intentional)
+    const metavarValidation = PatternValidator.compareMetavariables(params.pattern, params.replacement);
+    if (!metavarValidation.valid) {
+      throw new ValidationError(
+        `Metavariable mismatch: ${metavarValidation.errors.join('; ')}`,
+        { errors: metavarValidation.errors }
+      );
+    }
+
+    // Capture warnings for API consumers
+    const warnings = metavarValidation.warnings && metavarValidation.warnings.length > 0
+      ? metavarValidation.warnings
+      : undefined;
+
+    // Log warnings if any
+    if (warnings) {
+      console.error('Metavariable warnings:', warnings.join('; '));
+    }
+
+    // Validate optional parameters with actionable error messages
+    const timeoutValidation = ParameterValidator.validateTimeout(params.timeoutMs);
+    if (!timeoutValidation.valid) {
+      throw new ValidationError(timeoutValidation.errors.join('; '), { errors: timeoutValidation.errors });
+    }
+
+    const codeValidation = ParameterValidator.validateCode(params.code);
+    if (!codeValidation.valid) {
+      throw new ValidationError(codeValidation.errors.join('; '), { errors: codeValidation.errors });
     }
 
     const normalizeLang = (lang: string) => {
@@ -77,14 +122,14 @@ export class ReplaceTool {
 
     try {
       const result = await this.binaryManager.executeAstGrep(args, executeOptions);
-      return this.parseResults(result.stdout, params);
+      return this.parseResults(result.stdout, params, warnings);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       throw new ExecutionError(`Replace failed: ${message}`);
     }
   }
 
-  private parseResults(stdout: string, params: any): any {
+  private parseResults(stdout: string, params: any, warnings?: string[]): any {
     const changes: any[] = [];
 
     if (!stdout.trim()) {
@@ -93,13 +138,16 @@ export class ReplaceTool {
         summary: {
           totalChanges: 0,
           filesModified: 0,
-          dryRun: params.dryRun !== false
+          skippedLines: 0,
+          dryRun: params.dryRun !== false,
+          ...(warnings && warnings.length > 0 ? { warnings } : {})
         }
       };
     }
 
     // Parse diff output - very simple approach
     const lines = stdout.split('\n');
+    let skippedLines = 0;
     let currentFile = '';
     let changeCount = 0;
     let diffContent = '';
@@ -121,7 +169,15 @@ export class ReplaceTool {
       } else if (line.includes('│-') || line.includes('│+')) {
         if (line.includes('│-')) changeCount++;
         diffContent += line + '\n';
+      } else if (line.trim() === '' || /^\s+$/.test(line) || line.startsWith('@@') || 
+                 line.startsWith('diff --git') || line.startsWith('index') || 
+                 line.startsWith('---') || line.startsWith('+++')) {
+        // Valid formatting: empty lines, whitespace, diff markers, or diff metadata
+        diffContent += line + '\n';
       } else {
+        // Unexpected line that doesn't match any known diff pattern
+        skippedLines++;
+        console.error(`Warning: Skipped unexpected diff line: ${line.substring(0, 100)}...`);
         diffContent += line + '\n';
       }
     }
@@ -136,12 +192,19 @@ export class ReplaceTool {
       });
     }
 
+    // Log summary warning if any lines were skipped
+    if (skippedLines > 0) {
+      console.error(`Warning: Skipped ${skippedLines} unexpected diff lines out of ${lines.length} total lines`);
+    }
+
     return {
       changes,
       summary: {
         totalChanges: changes.reduce((sum, c) => sum + c.matches, 0),
         filesModified: changes.length,
-        dryRun: params.dryRun !== false
+        skippedLines,
+        dryRun: params.dryRun !== false,
+        ...(warnings && warnings.length > 0 ? { warnings } : {})
       }
     };
   }
@@ -149,40 +212,142 @@ export class ReplaceTool {
   static getSchema() {
     return {
       name: 'ast_replace',
-      description: 'Direct ast-grep replace with metavariable support. Use $NAME for single nodes, $$$NAME for multi-nodes (NEVER bare $$$).',
+      description: `Perform structural code replacements using AST pattern matching.
+
+WARNING: This tool can modify files! Always use dryRun=true (default) first.
+
+WHEN TO USE THIS TOOL:
+• Automated refactoring (rename functions, change APIs, update patterns)
+• Code modernization (convert old syntax to new syntax)
+• Bulk updates across multiple files
+• Testing replacement patterns before creating formal rules
+
+WORKFLOW RECOMMENDATION:
+1. Test pattern with ast_search first to see what matches
+2. Run ast_replace with dryRun=true (default) to preview changes
+3. Review the diff output carefully
+4. Run with dryRun=false only after confirming changes are correct
+
+METAVARIABLE RULES:
+• Pattern and replacement MUST use the same metavariable names
+• $VAR in pattern can be used as $VAR in replacement
+• $$$MULTI in pattern can be used as $$$MULTI in replacement
+• You can reorder, duplicate, or omit metavariables in replacement
+• NEVER use bare $$$ - always name multi-node metavariables
+
+COMMON REPLACEMENT PATTERNS:
+
+1. Simple renaming:
+   Pattern: "oldFunction($$$ARGS)"
+   Replacement: "newFunction($$$ARGS)"
+
+2. API migration:
+   Pattern: "jQuery($SELECTOR).click($HANDLER)"
+   Replacement: "document.querySelector($SELECTOR).addEventListener('click', $HANDLER)"
+
+3. Syntax modernization:
+   Pattern: "var $NAME = $VALUE"
+   Replacement: "const $NAME = $VALUE"
+
+4. Function to arrow function:
+   Pattern: "function $NAME($$$PARAMS) { $$$BODY }"
+   Replacement: "const $NAME = ($$$PARAMS) => { $$$BODY }"
+
+5. Adding/removing arguments:
+   Pattern: "logger.log($MSG)"
+   Replacement: "logger.log('INFO', $MSG)"
+
+6. Wrapping code:
+   Pattern: "$EXPR"
+   Replacement: "await $EXPR"
+   (Note: Be specific with pattern to avoid matching everything!)
+
+7. Reordering:
+   Pattern: "compare($A, $B)"
+   Replacement: "compare($B, $A)"
+
+MODES OF OPERATION:
+
+1. Inline Code Mode (RECOMMENDED FOR TESTING):
+   - Use code parameter with language
+   - Safe way to test replacement patterns
+   - Example: {
+       pattern: "console.log($ARG)",
+       replacement: "logger.info($ARG)",
+       code: "console.log('test'); console.log('debug');",
+       language: "javascript",
+       dryRun: true
+     }
+
+2. File Mode (FOR ACTUAL CHANGES):
+   - Specify paths or omit for current directory
+   - ALWAYS test with dryRun=true first
+   - Example: {
+       pattern: "var $NAME = $VALUE",
+       replacement: "const $NAME = $VALUE",
+       paths: ["src/"],
+       language: "javascript",
+       dryRun: false  // Only after reviewing dry-run output!
+     }
+
+DRY-RUN BEHAVIOR:
+• dryRun=true (DEFAULT): Shows diff preview, no files modified
+• dryRun=false: Applies changes to files immediately
+• Output includes file paths, number of changes, and diff preview
+• Review ALL changes before setting dryRun=false
+
+COMMON PITFALLS:
+• Forgetting to set language parameter (required for inline code)
+• Using different metavariable names in pattern vs replacement
+• Not testing with dryRun first
+• Overly broad patterns that match unintended code
+• Using bare $$$ instead of named $$$ARGS
+
+ERROR PREVENTION:
+• Tool validates metavariable naming (rejects bare $$$)
+• Workspace path validation prevents escaping project directory
+• Timeout protection for large-scale replacements
+• Diff preview helps catch unintended changes
+
+LIMITATIONS:
+• Cannot add/remove structural elements (e.g., can't add new function parameters without matching existing ones)
+• Replacement must be valid syntax in target language
+• Complex transformations may require multiple passes
+• Some edge cases may need manual review`,
+
       inputSchema: {
         type: 'object',
         properties: {
           pattern: {
             type: 'string',
-            description: 'AST pattern to match. Examples: console.log($ARG), var $NAME = $VALUE, function $NAME($PARAMS) { $$$BODY }. CRITICAL: Use named multi-node metavariables like $$$BODY, never bare $$$.'
+            description: 'AST pattern to match. Use $VAR for single nodes, $$$NAME for multiple. Examples: "console.log($ARG)", "var $NAME = $VALUE"'
           },
           replacement: {
             type: 'string',
-            description: 'Replacement template using same metavariables. Examples: logger.info($ARG), const $NAME = $VALUE, const $NAME = ($PARAMS) => { $$$BODY }. Must use same metavariable names as pattern.'
+            description: 'Replacement template using same metavariables as pattern. Examples: "logger.info($ARG)", "const $NAME = $VALUE"'
           },
           code: {
             type: 'string',
-            description: 'Apply replacement to inline code (recommended for testing). When using this, language parameter is REQUIRED.'
+            description: 'Apply replacement to inline code (requires language). Recommended for testing before applying to files.'
           },
           paths: {
             type: 'array',
             items: { type: 'string' },
-            description: 'File paths to modify within workspace (default: current directory). Paths are validated for security.'
+            description: 'File paths to modify (default: current directory). Paths validated for security.'
           },
           language: {
             type: 'string',
-            description: 'Programming language: javascript/js, typescript/ts, python, java, etc. REQUIRED when using code parameter.'
+            description: 'Programming language (required for inline code): javascript/js, typescript/ts, python/py, etc.'
           },
           dryRun: {
             type: 'boolean',
             default: true,
-            description: 'Show diff preview without making changes (default: true). Set false to apply changes.'
+            description: 'Preview changes without modifying files (default: true). Set false to apply changes after reviewing preview.'
           },
           timeoutMs: {
             type: 'number',
             default: 60000,
-            description: 'Timeout in milliseconds (default: 60000)'
+            description: 'Timeout in milliseconds (1000-300000)'
           }
         },
         required: ['pattern', 'replacement']

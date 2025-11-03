@@ -4,6 +4,7 @@ import * as os from 'os';
 import { AstGrepBinaryManager } from '../core/binary-manager.js';
 import { WorkspaceManager } from '../core/workspace-manager.js';
 import { ValidationError, ExecutionError } from '../types/errors.js';
+import { PatternValidator, YamlValidator, ParameterValidator } from '../utils/validation.js';
 
 /**
  * Rule builder that generates YAML and runs ast-grep scan
@@ -15,9 +16,52 @@ export class ScanTool {
   ) {}
 
   async execute(params: any): Promise<any> {
-    // Basic validation
-    if (!params.id || !params.language || !params.pattern) {
-      throw new ValidationError('id, language, and pattern are required');
+    // Validate required parameters
+    if (!params.id || typeof params.id !== 'string') {
+      throw new ValidationError('id is required and must be a string');
+    }
+    if (!params.language || typeof params.language !== 'string') {
+      throw new ValidationError('language is required and must be a string');
+    }
+    if (!params.pattern || typeof params.pattern !== 'string') {
+      throw new ValidationError('pattern is required and must be a string');
+    }
+
+    // Validate rule ID format
+    const ruleIdValidation = YamlValidator.validateRuleId(params.id);
+    if (!ruleIdValidation.valid) {
+      throw new ValidationError(
+        `Invalid rule ID: ${ruleIdValidation.errors.join('; ')}`,
+        { errors: ruleIdValidation.errors }
+      );
+    }
+
+    // Validate pattern
+    const patternValidation = PatternValidator.validatePattern(params.pattern);
+    if (!patternValidation.valid) {
+      throw new ValidationError(
+        `Invalid pattern: ${patternValidation.errors.join('; ')}`,
+        { errors: patternValidation.errors }
+      );
+    }
+
+    // Validate severity if provided
+    if (params.severity) {
+      const severityValidation = YamlValidator.validateSeverity(params.severity);
+      if (!severityValidation.valid) {
+        throw new ValidationError(severityValidation.errors.join('; '));
+      }
+    }
+
+    // Validate optional parameters with actionable error messages
+    const timeoutValidation = ParameterValidator.validateTimeout(params.timeoutMs);
+    if (!timeoutValidation.valid) {
+      throw new ValidationError(timeoutValidation.errors.join('; '), { errors: timeoutValidation.errors });
+    }
+
+    const codeValidation = ParameterValidator.validateCode(params.code);
+    if (!codeValidation.valid) {
+      throw new ValidationError(codeValidation.errors.join('; '), { errors: codeValidation.errors });
     }
 
     const normalizeLang = (lang: string) => {
@@ -34,9 +78,10 @@ export class ScanTool {
     // Generate simple YAML rule
     const yaml = this.buildYaml({ ...params, language: normalizeLang(params.language) });
 
-    // Create temporary rule file
+    // Create temporary rule file with unique name
     const tempDir = os.tmpdir();
-    const rulesFile = path.join(tempDir, `rule-${Date.now()}.yml`);
+    const randomSuffix = Math.random().toString(36).substring(2, 15);
+    const rulesFile = path.join(tempDir, `rule-${Date.now()}-${randomSuffix}.yml`);
 
     let tempCodeFileForCleanup: string | null = null;
     try {
@@ -50,7 +95,8 @@ export class ScanTool {
       if (params.code) {
         const extMap: Record<string, string> = { js: 'js', ts: 'ts', jsx: 'jsx', tsx: 'tsx' };
         const ext = extMap[normalizeLang(params.language)] || 'js';
-        tempCodeFile = path.join(os.tmpdir(), `astgrep-inline-${Date.now()}.${ext}`);
+        const randomSuffix = Math.random().toString(36).substring(2, 15);
+        tempCodeFile = path.join(os.tmpdir(), `astgrep-inline-${Date.now()}-${randomSuffix}.${ext}`);
         await fs.writeFile(tempCodeFile, params.code, 'utf8');
         args.push(tempCodeFile);
         tempCodeFileForCleanup = tempCodeFile;
@@ -68,7 +114,7 @@ export class ScanTool {
         timeout: params.timeoutMs || 30000
       });
 
-      const findings = this.parseFindings(result.stdout);
+      const { findings, skippedLines } = this.parseFindings(result.stdout);
 
       const resultObj = {
         yaml,
@@ -77,7 +123,8 @@ export class ScanTool {
           summary: {
             totalFindings: findings.length,
             errors: findings.filter(f => f.severity === 'error').length,
-            warnings: findings.filter(f => f.severity === 'warning').length
+            warnings: findings.filter(f => f.severity === 'warning').length,
+            skippedLines
           }
         }
       };
@@ -85,50 +132,98 @@ export class ScanTool {
       return resultObj;
 
     } finally {
-      // Cleanup
-      try { await fs.unlink(rulesFile); } catch {}
+      // Cleanup with logging
+      const cleanupErrors: string[] = [];
+
+      try {
+        await fs.unlink(rulesFile);
+      } catch (e) {
+        cleanupErrors.push(`Failed to cleanup rule file: ${e instanceof Error ? e.message : String(e)}`);
+      }
+
       if (tempCodeFileForCleanup) {
-        try { await fs.unlink(tempCodeFileForCleanup); } catch {}
+        try {
+          await fs.unlink(tempCodeFileForCleanup);
+        } catch (e) {
+          cleanupErrors.push(`Failed to cleanup temp code file: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+
+      if (cleanupErrors.length > 0) {
+        console.error('Cleanup warnings:', cleanupErrors.join('; '));
       }
     }
   }
 
   private buildYaml(params: any): string {
+    // Extract metavariables from pattern for validation
+    const patternMetavars = PatternValidator.extractMetavariables(params.pattern);
+
     const lines = [
       `id: ${params.id}`,
-      `message: ${JSON.stringify(params.message || params.id)}`,
+      `message: ${YamlValidator.escapeYamlString(params.message || params.id)}`,
       `severity: ${params.severity || 'warning'}`,
       `language: ${params.language}`,
       'rule:',
-      `  pattern: ${JSON.stringify(params.pattern)}`
+      `  pattern: ${YamlValidator.escapeYamlString(params.pattern)}`
     ];
 
     // Add simple constraints if provided
     if (params.where && params.where.length > 0) {
       lines.push('  constraints:');
       for (const constraint of params.where) {
+        // Validate that metavariable exists in pattern
+        if (!patternMetavars.has(constraint.metavariable)) {
+          throw new ValidationError(
+            `Constraint references metavariable '${constraint.metavariable}' which is not in the pattern. ` +
+            `Available metavariables: ${Array.from(patternMetavars).join(', ') || 'none'}`
+          );
+        }
+
+        // Validate that constraint provides at least one operator (regex or equals)
+        const hasRegex = constraint.hasOwnProperty('regex') && typeof constraint.regex === 'string' && constraint.regex.trim().length > 0;
+        const hasEquals = constraint.hasOwnProperty('equals') && typeof constraint.equals === 'string' && constraint.equals.length > 0;
+
+        if (!hasRegex && !hasEquals) {
+          throw new ValidationError(
+            `Constraint for metavariable '${constraint.metavariable}' must specify either 'regex' or 'equals' with a non-empty value`
+          );
+        }
+
         lines.push(`    ${constraint.metavariable}:`);
-        if (constraint.regex) {
-          lines.push(`      regex: ${JSON.stringify(constraint.regex)}`);
-        } else if (constraint.equals) {
+        if (hasRegex) {
+          lines.push(`      regex: ${YamlValidator.escapeYamlString(constraint.regex)}`);
+        } else if (hasEquals) {
           const escaped = constraint.equals.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-          lines.push(`      regex: ${JSON.stringify('^' + escaped + '$')}`);
+          lines.push(`      regex: ${YamlValidator.escapeYamlString('^' + escaped + '$')}`);
         }
       }
     }
 
     // Add fix if provided
     if (params.fix) {
-      lines.push(`fix: ${JSON.stringify(params.fix)}`);
+      // Validate that fix metavariables exist in pattern
+      const fixMetavars = PatternValidator.extractMetavariables(params.fix);
+      for (const metavar of fixMetavars) {
+        if (!patternMetavars.has(metavar)) {
+          throw new ValidationError(
+            `Fix template uses metavariable '${metavar}' which is not in the pattern. ` +
+            `Available metavariables: ${Array.from(patternMetavars).join(', ') || 'none'}`
+          );
+        }
+      }
+
+      lines.push(`fix: ${YamlValidator.escapeYamlString(params.fix)}`);
     }
 
     return lines.join('\n');
   }
 
-  private parseFindings(stdout: string): any[] {
+  private parseFindings(stdout: string): { findings: any[], skippedLines: number } {
     const findings: any[] = [];
+    let skippedLines = 0;
 
-    if (!stdout.trim()) return findings;
+    if (!stdout.trim()) return { findings, skippedLines: 0 };
 
     const lines = stdout.trim().split('\n');
     for (const line of lines) {
@@ -145,35 +240,211 @@ export class ScanTool {
           fix: finding.fix
         });
       } catch (e) {
-        // Skip malformed lines
+        skippedLines++;
+        console.error(`Warning: Skipped malformed JSON line: ${line.substring(0, 100)}...`);
       }
     }
 
-    return findings;
+    if (skippedLines > 0) {
+      console.error(`Warning: Skipped ${skippedLines} malformed finding lines out of ${lines.length} total lines`);
+    }
+
+    return { findings, skippedLines };
   }
 
   static getSchema() {
     return {
       name: 'ast_run_rule',
-      description: '🔍 Generate and run ast-grep scanning rules. Supports pattern matching, constraints, and fix templates. Use `code` parameter for inline code or `paths` for file scanning.',
+      description: `Generate and execute ast-grep YAML rules with advanced features.
+
+WHEN TO USE THIS TOOL:
+• Need constraints on metavariables (filter by name, type, or pattern)
+• Want to provide automated fix suggestions
+• Need to categorize findings by severity (error/warning/info)
+• Building reusable code quality rules
+• Complex pattern matching that requires multiple conditions
+
+WHEN TO USE ast_search INSTEAD:
+• Simple pattern matching without constraints
+• Quick exploration of codebase
+• Don't need fix suggestions or severity levels
+
+WHEN TO USE ast_replace INSTEAD:
+• Want to apply changes immediately
+• Don't need to categorize or report findings
+• Simple find-and-replace operations
+
+RULE STRUCTURE:
+This tool generates YAML rules with the following components:
+1. id: Unique identifier for the rule
+2. message: Human-readable description of the issue
+3. severity: error | warning | info
+4. language: Target programming language
+5. pattern: AST pattern to match
+6. constraints (optional): Filter matches based on metavariable content
+7. fix (optional): Suggested replacement code
+
+CONSTRAINT EXAMPLES:
+
+1. Match specific variable names:
+   {
+     id: "no-test-vars",
+     pattern: "const $NAME = $VALUE",
+     where: [
+       { metavariable: "NAME", regex: "^test" }
+     ]
+   }
+   // Matches: const testVar = 1
+   // Doesn't match: const myVar = 1
+
+2. Match specific values:
+   {
+     id: "no-magic-numbers",
+     pattern: "timeout($DURATION)",
+     where: [
+       { metavariable: "DURATION", regex: "^[0-9]+$" }
+     ]
+   }
+   // Matches: timeout(5000)
+   // Doesn't match: timeout(TIMEOUT_CONSTANT)
+
+3. Exact matching:
+   {
+     id: "no-console-log",
+     pattern: "$OBJ.$METHOD($$$ARGS)",
+     where: [
+       { metavariable: "OBJ", equals: "console" },
+       { metavariable: "METHOD", equals: "log" }
+     ]
+   }
+   // Matches: console.log(...)
+   // Doesn't match: logger.log(...) or console.error(...)
+
+4. Multiple constraints:
+   {
+     id: "deprecated-api",
+     pattern: "$OBJ.$METHOD($$$ARGS)",
+     where: [
+       { metavariable: "OBJ", equals: "oldAPI" },
+       { metavariable: "METHOD", regex: "^(get|set)" }
+     ]
+   }
+   // Matches: oldAPI.getData(...) or oldAPI.setData(...)
+
+FIX TEMPLATE EXAMPLES:
+
+1. Simple replacement:
+   {
+     pattern: "console.log($ARG)",
+     fix: "logger.info($ARG)"
+   }
+
+2. Reordering:
+   {
+     pattern: "assertEquals($EXPECTED, $ACTUAL)",
+     fix: "assertEquals($ACTUAL, $EXPECTED)"
+   }
+
+3. Adding context:
+   {
+     pattern: "throw new Error($MSG)",
+     fix: "throw new Error(\`[\${MODULE}] \${$MSG}\`)"
+   }
+
+SEVERITY GUIDELINES:
+• error: Code that will cause bugs or runtime failures
+• warning: Code that should be changed but won't break (default)
+• info: Suggestions for improvement, style issues
+
+COMPLETE EXAMPLES:
+
+1. Enforce const over var:
+   {
+     id: "prefer-const",
+     language: "javascript",
+     pattern: "var $NAME = $VALUE",
+     message: "Use 'const' or 'let' instead of 'var'",
+     severity: "warning",
+     fix: "const $NAME = $VALUE",
+     paths: ["src/"]
+   }
+
+2. Detect deprecated API with constraints:
+   {
+     id: "no-deprecated-api",
+     language: "typescript",
+     pattern: "$OBJ.$METHOD($$$ARGS)",
+     message: "This API is deprecated, use newAPI instead",
+     severity: "error",
+     where: [
+       { metavariable: "OBJ", equals: "oldAPI" }
+     ],
+     fix: "newAPI.$METHOD($$$ARGS)",
+     code: "oldAPI.getData(); newAPI.getData();"
+   }
+
+3. Enforce naming conventions:
+   {
+     id: "constant-naming",
+     language: "javascript",
+     pattern: "const $NAME = $VALUE",
+     message: "Constants should be UPPER_CASE",
+     severity: "info",
+     where: [
+       { metavariable: "NAME", regex: "^[a-z]" }
+     ]
+   }
+
+OUTPUT FORMAT:
+Returns both the generated YAML rule and scan results:
+• yaml: The generated YAML rule (can be saved for reuse)
+• scan.findings: Array of matches with file, line, column, message
+• scan.summary: Statistics (total findings, errors, warnings)
+
+MODES OF OPERATION:
+
+1. Inline Code Mode (for testing):
+   - Use code parameter
+   - Quick validation of rule logic
+   - Example: { ..., code: "var x = 1; const y = 2;" }
+
+2. File/Directory Mode (for scanning):
+   - Use paths parameter or omit for current directory
+   - Scans actual codebase
+   - Example: { ..., paths: ["src/", "lib/"] }
+
+BEST PRACTICES:
+• Start with simple pattern, add constraints incrementally
+• Test with inline code before scanning files
+• Use descriptive rule IDs (kebab-case recommended)
+• Provide clear, actionable messages
+• Test fix templates thoroughly before relying on them
+• Use appropriate severity levels
+
+LIMITATIONS:
+• Constraints only support regex and equals matching
+• Fix templates cannot perform complex transformations
+• YAML generation is simplified (advanced features require manual YAML)
+• Temporary files are created and cleaned up automatically`,
+
       inputSchema: {
         type: 'object',
         properties: {
           id: {
             type: 'string',
-            description: 'Unique rule identifier (e.g., "no-console-log", "require-const")'
+            description: 'Unique rule identifier in kebab-case (e.g., "no-console-log", "require-const")'
           },
           language: {
             type: 'string',
-            description: 'Programming language: javascript/js, typescript/ts, python, rust, go, java, etc. Case-insensitive.'
+            description: 'Programming language: javascript/js, typescript/ts, python/py, rust, go, java, cpp, etc.'
           },
           pattern: {
             type: 'string',
-            description: 'AST pattern with metavariables: console.log($ARG), function $NAME($PARAMS) { $$$BODY }. Use $VAR for single nodes, $$$NAME for multiple nodes (must be named).'
+            description: 'AST pattern with metavariables. Use $VAR for single nodes, $$$NAME for multiple. Examples: "console.log($ARG)", "function $NAME($$$PARAMS) { $$$BODY }"'
           },
           message: {
             type: 'string',
-            description: 'Human-readable message describing the issue (defaults to rule id if not provided)'
+            description: 'Human-readable message describing the issue (defaults to rule id)'
           },
           severity: {
             type: 'string',
@@ -186,17 +457,26 @@ export class ScanTool {
             items: {
               type: 'object',
               properties: {
-                metavariable: { type: 'string' },
-                regex: { type: 'string' },
-                equals: { type: 'string' }
+                metavariable: {
+                  type: 'string',
+                  description: 'Metavariable name from pattern (without $ prefix)'
+                },
+                regex: {
+                  type: 'string',
+                  description: 'Regular expression to match metavariable content'
+                },
+                equals: {
+                  type: 'string',
+                  description: 'Exact string to match metavariable content'
+                }
               },
               required: ['metavariable']
             },
-            description: 'Constraints on metavariables. Each constraint filters matches based on metavariable content using regex or exact equals matching.'
+            description: 'Constraints to filter matches. Each constraint must reference a metavariable from the pattern.'
           },
           fix: {
             type: 'string',
-            description: 'Optional fix template using same metavariables as pattern (e.g., "logger.info($ARG)" for console.log fix)'
+            description: 'Fix template using same metavariables as pattern. Example: "logger.info($ARG)" for console.log($ARG) pattern'
           },
           paths: {
             type: 'array',
@@ -205,12 +485,12 @@ export class ScanTool {
           },
           code: {
             type: 'string',
-            description: 'Inline code to scan instead of files'
+            description: 'Inline code to scan instead of files (useful for testing rules)'
           },
           timeoutMs: {
             type: 'number',
             default: 30000,
-            description: 'Timeout in milliseconds'
+            description: 'Timeout in milliseconds (1000-300000)'
           }
         },
         required: ['id', 'language', 'pattern']
