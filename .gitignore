@@ -60,10 +60,11 @@ temp/
 .vscode-test/
 .vscode-test-web/
 
-# Package manager lock files (optional - uncomment if needed)
-# package-lock.json
-# yarn.lock
-# pnpm-lock.yaml
+# Package manager lock files
+# This project uses Bun - ignore npm/yarn/pnpm lock files
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
 
 # MCP specific
 .mcp/
