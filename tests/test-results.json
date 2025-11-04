@@ -1,0 +1,183 @@
+{
+  "chalk": [
+    {
+      "name": "Function Definitions",
+      "pattern": "function $NAME($$$PARAMS) { $$$BODY }",
+      "language": "javascript",
+      "options": {
+        "context": 3,
+        "maxMatches": 100
+      },
+      "executionTime": 129,
+      "memoryUsed": "0.02",
+      "matchCount": 0,
+      "skippedLines": 0,
+      "matches": [],
+      "stderr": ""
+    },
+    {
+      "name": "Console.log Detection",
+      "pattern": "console.log($$$ARGS)",
+      "language": "javascript",
+      "options": {
+        "context": 2
+      },
+      "executionTime": 33,
+      "memoryUsed": "0.64",
+      "matchCount": 0,
+      "skippedLines": 0,
+      "matches": [],
+      "stderr": ""
+    },
+    {
+      "name": "Arrow Functions",
+      "pattern": "const $NAME = ($$$ARGS) => $$$BODY",
+      "language": "javascript",
+      "options": {
+        "context": 2
+      },
+      "executionTime": 31,
+      "memoryUsed": "0.19",
+      "matchCount": 0,
+      "skippedLines": 0,
+      "matches": [],
+      "stderr": ""
+    },
+    {
+      "name": "TypeScript Interfaces",
+      "pattern": "interface $NAME { $$$PROPS }",
+      "language": "typescript",
+      "options": {
+        "context": 3
+      },
+      "executionTime": 49,
+      "memoryUsed": "1.06",
+      "matchCount": 0,
+      "skippedLines": 0,
+      "matches": [],
+      "stderr": ""
+    },
+    {
+      "name": "Module Exports",
+      "pattern": "module.exports = $EXPR",
+      "language": "javascript",
+      "options": {
+        "context": 2
+      },
+      "executionTime": 34,
+      "memoryUsed": "1.45",
+      "matchCount": 1,
+      "skippedLines": 0,
+      "matches": [
+        []
+      ],
+      "stderr": ""
+    }
+  ],
+  "typer": [
+    {
+      "name": "Function Decorators",
+      "pattern": "@$DECORATOR\\ndef $FUNC($$$ARGS): $$$BODY",
+      "language": "python",
+      "options": {
+        "context": 4
+      },
+      "executionTime": 31,
+      "memoryUsed": 0,
+      "matchCount": 0,
+      "skippedLines": 0,
+      "matches": [],
+      "error": "Command failed: cd \"D:\\test-repos\\typer\" && ast-grep -p \"@$DECORATOR\\ndef $FUNC($$$ARGS): $$$BODY\" -l python -C 4 --json\nError: Cannot parse query as a valid pattern.\nHelp: The pattern either fails to parse or contains error. Please refer to pattern syntax guide.\nSee also: https://ast-grep.github.io/guide/pattern-syntax.html\n\n✖ Caused by\n╰▻ Multiple AST nodes are detected. Please check the pattern source `@µDECORATOR\\ndef µFUNC(µµµARGS): µµµBODY`.\n\n"
+    },
+    {
+      "name": "Type-Annotated Functions",
+      "pattern": "def $NAME($$$PARAMS): $$$BODY",
+      "language": "python",
+      "options": {
+        "context": 3
+      },
+      "executionTime": 1196,
+      "memoryUsed": "11.04",
+      "matchCount": 0,
+      "skippedLines": 0,
+      "matches": [],
+      "stderr": ""
+    },
+    {
+      "name": "Class Inheritance",
+      "pattern": "class $NAME($BASE): $$$BODY",
+      "language": "python",
+      "options": {
+        "context": 3
+      },
+      "executionTime": 57,
+      "memoryUsed": "0.49",
+      "matchCount": 0,
+      "skippedLines": 0,
+      "matches": [],
+      "stderr": ""
+    }
+  ],
+  "hyperfine": [
+    {
+      "name": "Function Definitions",
+      "pattern": "fn $NAME($$$PARAMS) -> $RET { $$$BODY }",
+      "language": "rust",
+      "options": {
+        "context": 3
+      },
+      "executionTime": 142,
+      "memoryUsed": "1.28",
+      "matchCount": 0,
+      "skippedLines": 0,
+      "matches": [],
+      "stderr": ""
+    },
+    {
+      "name": "Match Expressions",
+      "pattern": "match $EXPR { $$$ARMS }",
+      "language": "rust",
+      "options": {
+        "context": 4
+      },
+      "executionTime": 41,
+      "memoryUsed": "44.15",
+      "matchCount": 0,
+      "skippedLines": 0,
+      "matches": [],
+      "stderr": ""
+    }
+  ],
+  "execa": [
+    {
+      "name": "Async Functions",
+      "pattern": "async function $NAME($$$PARAMS) { $$$BODY }",
+      "language": "javascript",
+      "options": {
+        "context": 3
+      },
+      "executionTime": 1041,
+      "memoryUsed": "0.10",
+      "matchCount": 1,
+      "skippedLines": 0,
+      "matches": [
+        []
+      ],
+      "stderr": ""
+    },
+    {
+      "name": "Await Expressions",
+      "pattern": "await $EXPR",
+      "language": "javascript",
+      "options": {
+        "context": 1
+      },
+      "executionTime": 78,
+      "memoryUsed": "6.12",
+      "matchCount": 0,
+      "skippedLines": 0,
+      "matches": [],
+      "stderr": ""
+    }
+  ]
+}

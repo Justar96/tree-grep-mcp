@@ -1,0 +1,14 @@
+{
+  "expressMiddleware": {
+    "error": "Invalid paths"
+  },
+  "flaskRoutes": {
+    "error": "Invalid paths"
+  },
+  "hugoErrors": {
+    "error": "Invalid paths"
+  },
+  "fastifyHooks": {
+    "error": "Invalid paths"
+  }
+}

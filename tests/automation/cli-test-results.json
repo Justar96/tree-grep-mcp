@@ -1,0 +1,36 @@
+[
+  {
+    "test": "Express Middleware",
+    "overhead": 153.8,
+    "cli": {
+      "matches": 200,
+      "time": 78
+    },
+    "mcp": {
+      "matches": null,
+      "time": 198
+    },
+    "accuracy": 0.0
+  },
+  {
+    "test": "Flask Routes",
+    "cli": {
+      "matches": 4,
+      "time": 59
+    }
+  },
+  {
+    "test": "Hugo Error Handling",
+    "cli": {
+      "matches": 200,
+      "time": 54
+    }
+  },
+  {
+    "test": "Fastify Hooks",
+    "cli": {
+      "matches": 358,
+      "time": 96
+    }
+  }
+]
