@@ -9,7 +9,7 @@ cache = { dir = ".bun-cache" }
 
 [test]
 # Test configuration
-preload = ["./tests/setup.js"]
+preload = ["./tests/setup.ts"]
 coverage = true
 
 [run]
