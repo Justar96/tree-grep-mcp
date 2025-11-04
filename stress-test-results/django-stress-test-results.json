@@ -1,0 +1,176 @@
+{
+  "repository": "django",
+  "tests": [
+    {
+      "name": "Model Definition - Memory Profiling",
+      "type": "memory",
+      "results": {
+        "executionTime": 853,
+        "memoryBefore": {
+          "rss": 73879552,
+          "heapTotal": 40206336,
+          "heapUsed": 5709816,
+          "external": 2045830,
+          "formatted": {
+            "rss": "70.46 MB",
+            "heapTotal": "38.34 MB",
+            "heapUsed": "5.45 MB",
+            "external": "1.95 MB"
+          }
+        },
+        "memoryDuring": {
+          "rss": 73887744,
+          "heapTotal": 40206336,
+          "heapUsed": 5934584,
+          "external": 2039999,
+          "formatted": {
+            "rss": "70.46 MB",
+            "heapTotal": "38.34 MB",
+            "heapUsed": "5.66 MB",
+            "external": "1.95 MB"
+          }
+        },
+        "memoryAfter": {
+          "rss": 73900032,
+          "heapTotal": 40206336,
+          "heapUsed": 5713680,
+          "external": 2039999,
+          "formatted": {
+            "rss": "70.48 MB",
+            "heapTotal": "38.34 MB",
+            "heapUsed": "5.45 MB",
+            "external": "1.95 MB"
+          }
+        },
+        "memoryIncreased": 224768,
+        "memoryLeaked": 3864,
+        "leakPercentage": 1.7,
+        "matchesFound": 0
+      }
+    },
+    {
+      "name": "ORM Query Pattern - Timeout Testing",
+      "type": "timeout",
+      "results": [
+        {
+          "timeout": 30000,
+          "completed": true,
+          "executionTime": 597,
+          "matchesFound": 2069
+        }
+      ]
+    },
+    {
+      "name": "Replace Tool - String Formatting",
+      "type": "replace",
+      "results": {
+        "executionTime": 539,
+        "memoryUsed": 190976,
+        "filesModified": 1,
+        "totalChanges": 1,
+        "diffSize": 0,
+        "dryRun": true
+      }
+    },
+    {
+      "name": "Scan Tool - SQL Injection",
+      "type": "scan",
+      "results": {
+        "error": "ast-grep execution failed: Command failed: cmd.exe /c C:\\Users\\nalon\\AppData\\Roaming\\npm\\ast-grep.cmd scan --rule C:\\Users\\nalon\\AppData\\Local\\Temp\\rule-1762251769752-7tswid0ouer.yml --json=stream D:\\_Project\\_mcp\\tree-grep-mcp\\test-repos\\large\\django\nError: 10 error(s) found in code.\nHelp: Scan succeeded and found error level diagnostics in the codebase.\n\n"
+      }
+    },
+    {
+      "name": "Decorator Pattern - Truncation Testing",
+      "type": "truncation",
+      "results": [
+        {
+          "maxMatches": 100,
+          "executionTime": 694,
+          "memoryUsed": 190192,
+          "totalMatches": 0,
+          "matchesReturned": 0,
+          "truncatedCorrectly": true
+        },
+        {
+          "maxMatches": 500,
+          "executionTime": 623,
+          "memoryUsed": 162144,
+          "totalMatches": 0,
+          "matchesReturned": 0,
+          "truncatedCorrectly": true
+        },
+        {
+          "maxMatches": 1000,
+          "executionTime": 603,
+          "memoryUsed": 162144,
+          "totalMatches": 0,
+          "matchesReturned": 0,
+          "truncatedCorrectly": true
+        },
+        {
+          "maxMatches": 5000,
+          "executionTime": 664,
+          "memoryUsed": 164016,
+          "totalMatches": 0,
+          "matchesReturned": 0,
+          "truncatedCorrectly": true
+        },
+        {
+          "maxMatches": 10000,
+          "executionTime": 654,
+          "memoryUsed": 163912,
+          "totalMatches": 0,
+          "matchesReturned": 0,
+          "truncatedCorrectly": true
+        }
+      ]
+    },
+    {
+      "name": "Complex Class Method - Memory Profiling",
+      "type": "memory",
+      "results": {
+        "executionTime": 556,
+        "memoryBefore": {
+          "rss": 74043392,
+          "heapTotal": 7700480,
+          "heapUsed": 5743296,
+          "external": 2040006,
+          "formatted": {
+            "rss": "70.61 MB",
+            "heapTotal": "7.34 MB",
+            "heapUsed": "5.48 MB",
+            "external": "1.95 MB"
+          }
+        },
+        "memoryDuring": {
+          "rss": 73908224,
+          "heapTotal": 7700480,
+          "heapUsed": 5920072,
+          "external": 2040006,
+          "formatted": {
+            "rss": "70.48 MB",
+            "heapTotal": "7.34 MB",
+            "heapUsed": "5.65 MB",
+            "external": "1.95 MB"
+          }
+        },
+        "memoryAfter": {
+          "rss": 74014720,
+          "heapTotal": 7962624,
+          "heapUsed": 5787032,
+          "external": 2039757,
+          "formatted": {
+            "rss": "70.59 MB",
+            "heapTotal": "7.59 MB",
+            "heapUsed": "5.52 MB",
+            "external": "1.95 MB"
+          }
+        },
+        "memoryIncreased": 176776,
+        "memoryLeaked": 43736,
+        "leakPercentage": 24.7,
+        "matchesFound": 0
+      }
+    }
+  ]
+}
