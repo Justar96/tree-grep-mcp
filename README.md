@@ -1,10 +1,10 @@
 # tree-ast-grep MCP Server
 
-A **simple, direct wrapper** around ast-grep for AI coding agents. Zero abstractions, maximum performance, perfect ast-grep compatibility.
+A Model Context Protocol server that provides structural code search and transformation using ast-grep. Direct wrapper with zero abstractions for maximum performance and perfect CLI compatibility.
 
-## 🚀 Quick Start
+## Installation
 
-Add to your MCP settings:
+Add to your MCP settings configuration:
 
 ```json
 {
@@ -17,228 +17,205 @@ Add to your MCP settings:
 }
 ```
 
-**Using Bun (for development):**
+## Tools
+
+This server exposes three tools for structural code operations:
+
+### ast_search
+
+Search code using AST pattern matching (structural search, not text search).
+
+**Parameters:**
+- `pattern` (required): AST pattern with metavariables
+  - `$VAR` - matches single AST node
+  - `$$$NAME` - matches zero or more nodes (must be named)
+  - `$_` - anonymous single match
+- `code` (optional): Inline code to search (requires `language`)
+- `paths` (optional): Array of file/directory paths
+- `language` (optional): Programming language (required for inline code)
+  - Supported: `javascript`, `typescript`, `python`, `rust`, `java`, `go`, `cpp`, etc.
+  - Aliases: `js`→`javascript`, `ts`→`typescript`, `py`→`python`
+- `context` (optional): Number of context lines (0-100, default: 3)
+- `maxMatches` (optional): Maximum results (1-10000, default: 100)
+- `timeoutMs` (optional): Timeout in milliseconds (1000-300000, default: 30000)
+
+**Example:**
 ```json
 {
-  "mcpServers": {
-    "tree-ast-grep": {
-      "command": "bunx",
-      "args": ["@cabbages/tree-grep", "--auto-install"]
-    }
-  }
+  "pattern": "console.log($ARG)",
+  "language": "javascript",
+  "code": "console.log('hello'); console.log('world');"
 }
 ```
 
-## 🎯 What It Does
+### ast_replace
 
-Three simple tools that directly execute ast-grep commands:
+Perform structural code replacements using AST pattern matching.
 
-- **`ast_search`** → `ast-grep run --pattern` (structural code search)
-- **`ast_replace`** → `ast-grep run --rewrite` (AST-aware replacements)
-- **`ast_run_rule`** → `ast-grep scan --rule` (generate & run custom rules)
+**Parameters:**
+- `pattern` (required): AST pattern to match
+- `replacement` (required): Replacement template using same metavariables
+- `code` (optional): Inline code to transform (requires `language`)
+- `paths` (optional): Array of file/directory paths
+- `language` (optional): Programming language (required for inline code)
+- `dryRun` (optional): Preview without modifying files (default: `true`)
+- `timeoutMs` (optional): Timeout in milliseconds (1000-300000, default: 60000)
 
-## ✨ Key Features
-
-- **Zero Overhead** - Direct ast-grep execution, no abstractions
-- **Perfect Compatibility** - Behaves exactly like ast-grep CLI
-- **Inline Code Support** - Test patterns without files
-- **Named Metavariables** - `$NAME`, `$ARG`, `$$$BODY` work perfectly
-- **Auto-Install** - Downloads platform-specific ast-grep binary
-- **Minimal Codebase** - ~300 lines, crystal clear logic
-- **🔍 MCP Inspector** - Enhanced testing with Model Context Protocol integration
-
-## 📖 Usage Examples
-
-### Search for Patterns
-```javascript
-// Find all console.log statements
-ast_search({
-  pattern: "console.log($ARG)",
-  language: "javascript",
-  code: "console.log('hello'); console.log('world');"
-})
+**Example:**
+```json
+{
+  "pattern": "var $NAME = $VALUE",
+  "replacement": "const $NAME = $VALUE",
+  "language": "javascript",
+  "code": "var x = 5; var y = 10;",
+  "dryRun": true
+}
 ```
 
-### Replace Code Structures
-```javascript
-// Convert var to let
-ast_replace({
-  pattern: "var $NAME = $VALUE",
-  replacement: "let $NAME = $VALUE",
-  language: "javascript",
-  code: "var x = 5; var y = 10;"
-})
+**Important:** Always test with `dryRun: true` before applying changes.
+
+### ast_run_rule
+
+Generate and execute ast-grep YAML rules with constraints and fix suggestions.
+
+**Parameters:**
+- `id` (required): Unique rule identifier in kebab-case
+- `language` (required): Programming language
+- `pattern` (required): AST pattern to match
+- `message` (optional): Human-readable issue description
+- `severity` (optional): Issue severity (`error`, `warning`, `info`, default: `warning`)
+- `where` (optional): Array of constraints on metavariables
+  - `metavariable`: Name without `$` prefix
+  - `regex`: Regular expression to match content
+  - `equals`: Exact string to match content
+- `fix` (optional): Fix template using pattern metavariables
+- `code` (optional): Inline code to scan (requires `language`)
+- `paths` (optional): Array of file/directory paths
+- `timeoutMs` (optional): Timeout in milliseconds (1000-300000, default: 30000)
+
+**Example:**
+```json
+{
+  "id": "no-console-log",
+  "language": "javascript",
+  "pattern": "console.log($ARG)",
+  "message": "Use logger.info instead",
+  "severity": "warning",
+  "fix": "logger.info($ARG)"
+}
 ```
 
-### Generate Custom Rules
-```javascript
-// Create linting rule
-ast_run_rule({
-  id: "no-console-log",
-  pattern: "console.log($ARG)",
-  message: "Use logger.info instead",
-  language: "javascript",
-  fix: "logger.info($ARG)"
-})
+**Example with constraints:**
+```json
+{
+  "id": "test-vars-only",
+  "language": "javascript",
+  "pattern": "const $NAME = $VALUE",
+  "where": [
+    { "metavariable": "NAME", "regex": "^test" }
+  ],
+  "message": "Variables starting with test"
+}
 ```
 
-## 🏗️ Architecture
+## Pattern Syntax
 
-**Intentionally Simple:**
+Patterns use ast-grep's metavariable syntax for structural matching:
+
+- **Single node**: `$VAR`, `$NAME`, `$ARG`
+  - Matches: expressions, identifiers, statements
+  - Example: `console.log($ARG)` matches any single argument
+
+- **Multiple nodes**: `$$$NAME`, `$$$PARAMS`, `$$$BODY`
+  - Matches: zero or more nodes
+  - Must be named (bare `$$$` not allowed)
+  - Example: `function $NAME($$$PARAMS) { $$$BODY }`
+
+- **Anonymous match**: `$_`
+  - Use when you don't need to reference the match
+  - Example: `foo($_, $_, $_)` matches three arguments
+
+**Metavariable Rules:**
+- Names must be UPPER_CASE or UPPER_SNAKE_CASE
+- Multi-node metavariables must have names
+- Replacement templates must use same metavariables as pattern
+
+**Examples:**
 ```
-src/
-├── index.ts           # MCP server
-├── core/
-│   ├── binary-manager.ts    # Execute ast-grep
-│   └── workspace-manager.ts # Find workspace root
-├── tools/
-│   ├── search.ts      # Direct search
-│   ├── replace.ts     # Direct replace
-│   └── scan.ts        # Direct scan
-└── types/errors.ts    # Basic errors
+console.log($ARG)                          // Matches: console.log("hello")
+var $NAME = $VALUE                         // Matches: var x = 5
+function $NAME($$$PARAMS) { $$$BODY }      // Matches: function add(a, b) { return a + b; }
 ```
 
-Each tool: Validate → Build Command → Execute → Parse → Return
+## Configuration Options
 
-## 🧪 Testing
-
-Patterns work exactly like ast-grep CLI:
+The server supports these command-line flags:
 
 ```bash
-# Run unit suites via Vitest adapter (fast)
-npm test
-
-# Using Bun (faster)
-bun test
-# or
-npm run test:bun
-
-# Watch mode
-npm run test:watch
-
-# Run specific test suites
-npm run test:unit          # Node.js
-npm run test:unit:bun      # Bun
-npm run test:integration:bun
-
-# Integration/e2e via adapter (requires ast-grep availability)
-$env:AST_GREP_AVAILABLE="1"; npm test   # PowerShell
-# or
-AST_GREP_AVAILABLE=1 npm test           # bash
-
-# Direct ast-grep CLI examples
-ast-grep run --pattern "console.log($ARG)" --lang js file.js
-ast-grep run --pattern "var $NAME" --rewrite "let $NAME" --lang js file.js
-ast-grep scan --rule rule.yml file.js
-```
-
-## ⚡ Performance
-
-- **Direct Execution** - No overhead vs ast-grep CLI
-- **Streaming JSON** - Fast results parsing
-- **Binary Caching** - One-time download per platform
-- **Minimal Memory** - No complex abstractions
-
-## 🔧 Configuration Options
-
-```bash
-# Lightweight (requires system ast-grep)
+# Use system-installed ast-grep
 npx @cabbages/tree-grep --use-system
 
-# Platform-specific binary
-npx @cabbages/tree-grep --platform=win32
-
-# Auto-detect platform (recommended)
+# Auto-install platform-specific binary (recommended)
 npx @cabbages/tree-grep --auto-install
+
+# Specify platform manually
+npx @cabbages/tree-grep --platform=darwin-arm64
 ```
 
-## 📝 Metavariable Guide
+**Supported platforms:**
+- `darwin-x64` (macOS Intel)
+- `darwin-arm64` (macOS Apple Silicon)
+- `linux-x64` (Linux x86_64)
+- `linux-arm64` (Linux ARM64)
+- `win32-x64` (Windows x64)
+- `win32-arm64` (Windows ARM64)
 
-**✅ Reliable Patterns:**
-- `$NAME`, `$ARG`, `$VALUE` (single nodes)
-- `$$$BODY`, `$$$ARGS` (named multi-nodes)
-- `console.log($ARG)` → `logger.info($ARG)`
+## Workspace Detection
 
-**⚠️ Use With Care:**
-- Always name multi-node variables: use `$$$BODY`, `$$$ARGS` instead of bare `$$$`
-- Bare `$$$` in replacements does not expand and is now rejected by this server
-- Keep patterns aligned with ast-grep docs; test them with the CLI
+The server automatically detects project boundaries by searching for:
 
-## 🔤 Language IDs and Paths
+**Primary indicators:** `.git`, `package.json`, `Cargo.toml`, `go.mod`, `pom.xml`
+**Secondary indicators:** `pyproject.toml`, `composer.json`, `build.gradle`, `tsconfig.json`
+**Tertiary indicators:** `Makefile`, `README.md`, `.vscode`, `.idea`, `Gemfile`
 
-- Accepted languages are ast-grep’s IDs: `js`, `ts`, `jsx`, `tsx`, etc.
-- Aliases like `javascript`/`typescript` are mapped internally to `js`/`ts`.
-- Inline `code` requires `language`.
-- For file scans:
-  - Paths are resolved relative to `WORKSPACE_ROOT` (auto-detected if unset).
-  - Absolute paths are supported; Windows paths are normalized.
-  - If a single file with a known extension is provided and `language` is omitted, the server infers `--lang` from the filename.
+Override with `WORKSPACE_ROOT` environment variable.
 
-## 🚫 What This ISN'T
+## Security
 
-- ❌ A complex AST manipulation framework
-- ❌ A wrapper with proprietary pattern syntax
-- ❌ An abstraction layer over ast-grep
-- ❌ A reimplementation of ast-grep functionality
+All file paths are validated to prevent access outside the workspace:
 
-## ✅ What This IS
+- Paths must be within detected workspace root
+- System directories blocked (`/etc`, `/bin`, `C:\Windows`, etc.)
+- Sensitive directories blocked (`.ssh`, `.aws`, etc.)
+- Maximum path depth: 10 levels
 
-- ✅ Direct ast-grep command execution
-- ✅ Minimal MCP protocol wrapper
-- ✅ Perfect CLI compatibility
-- ✅ Zero-overhead tool integration
-- ✅ Simple, maintainable codebase
-
-## 🔍 MCP Inspector Integration
-
-Enhanced testing capabilities with Model Context Protocol integration for real-world agent usage alignment:
+## Development
 
 ```bash
-# Run tests with MCP Inspector
-npm run test:mcp
-
-# View MCP Inspector demo
-npm run demo:mcp
-
-# Generate comprehensive MCP reports
-npm run test:mcp-all
-```
-
-**Key MCP Inspector Features:**
-- Pattern matching validation with structured results
-- Code transformation inspection and verification
-- Real-world usage simulation for AI agents
-- MCP-compliant test reporting format
-- Enhanced debugging with inspection data
-
-See [`docs/MCP_INSPECTOR.md`](docs/MCP_INSPECTOR.md) for detailed documentation.
-
-## 🚀 Development
-
-This project supports both **Node.js** (for users) and **Bun** (for developers):
-
-```bash
-# Quick start with Bun (recommended for development)
+# Install dependencies
 bun install
-bun run dev:bun
+
+# Build
+bun run build
+
+# Run tests
 bun test
 
-# Or use Node.js (works everywhere)
-npm install
-npm run dev
-npm test
+# Development mode
+bun run dev:bun
 ```
 
-See [DEVELOPMENT.md](DEVELOPMENT.md) for detailed setup and performance comparison.
+## Requirements
 
-## 🤝 Contributing
+- Node.js >= 18.0.0 or Bun >= 1.0.0
+- ast-grep binary (auto-installed with `--auto-install` flag)
 
-Keep it simple! Follow the CLAUDE.md guidelines:
-- No abstractions or base classes
-- Direct command execution only
-- Test against ast-grep CLI behavior
-- Favor duplication over complexity
+## License
 
-## 📄 License
+MIT License
 
-MIT License - Use freely, keep it simple!
+## Links
+
+- GitHub: https://github.com/justar96/tree-grep-mcp
+- npm: https://www.npmjs.com/package/@cabbages/tree-grep
+- ast-grep: https://ast-grep.github.io/
