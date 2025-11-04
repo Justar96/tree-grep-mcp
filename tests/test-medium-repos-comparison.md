@@ -248,10 +248,12 @@ For each test scenario, follow these steps precisely:
 
 Create a test script `test-mcp-tool.js`:
 
+**Note**: Run `npm run build` before executing scripts so that `build/` directory exists with compiled JavaScript.
+
 ```javascript
-import { SearchTool, ReplaceTool, ScanTool } from '../src/tools/index.js';
-import { AstGrepBinaryManager } from '../src/core/binary-manager.js';
-import { WorkspaceManager } from '../src/core/workspace-manager.js';
+import { SearchTool, ReplaceTool, ScanTool } from '../../build/tools/index.js';
+import { AstGrepBinaryManager } from '../../build/core/binary-manager.js';
+import { WorkspaceManager } from '../../build/core/workspace-manager.js';
 
 // Initialize MCP components
 const binaryManager = new AstGrepBinaryManager({ useSystem: true });
@@ -319,7 +321,7 @@ cd D:/_Project/_test-repos/medium/express
 
 # Execute with timing (PowerShell)
 Measure-Command {
-  ast-grep run --pattern 'function($REQ, $RES, $NEXT) { $$BODY }' --lang js --json=stream . > results.jsonl
+  ast-grep run --pattern 'function($REQ, $RES, $NEXT) { $$$BODY }' --lang js --json=stream . > results.jsonl
 }
 
 # Or with Unix time command (Git Bash on Windows, or Linux/macOS)
@@ -1169,7 +1171,7 @@ console.log('MCP found:', result.summary.totalMatches, 'matches (truncated)');
 
 ```bash
 # CLI - Returns all matches
-time ast-grep run --pattern 'if err != nil { $$BODY }' --lang go --json=stream . > all-errors.jsonl
+time ast-grep run --pattern 'if err != nil { $$$BODY }' --lang go --json=stream . > all-errors.jsonl
 wc -l all-errors.jsonl  # Full count (likely 500-1000+)
 ```
 
