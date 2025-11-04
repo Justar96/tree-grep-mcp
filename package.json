@@ -1,6 +1,6 @@
 {
-  "name": "tree-grep-mcp",
-  "version": "1.0.16",
+  "name": "@cabbages/tree-grep",
+  "version": "1.1.0",
   "description": "Simple, direct ast-grep wrapper for AI coding agents. Zero abstractions, maximum performance.",
   "main": "./build/index.js",
   "bin": {
@@ -36,6 +36,9 @@
     "type": "git",
     "url": "git+https://github.com/justar96/tree-grep-mcp.git"
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.20.2",
     "zod": "^4.1.12"
@@ -59,7 +62,7 @@
       "command": "npx",
       "args": [
         "-y",
-        "tree-grep-mcp",
+        "@cabbages/tree-grep",
         "--auto-install"
       ]
     }
