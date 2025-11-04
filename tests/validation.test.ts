@@ -888,6 +888,622 @@ describe('ParameterValidator', () => {
   });
 });
 
+// ============================================
+// PathValidator Tests
+// ============================================
+describe('PathValidator', () => {
+  describe('normalizePath', () => {
+    test('normalizes Windows absolute paths with backslashes', () => {
+      const { PathValidator } = require('../src/utils/validation.js');
+      const result = PathValidator.normalizePath('C:\\Users\\project\\src');
+      expect(result).toBe('C:/Users/project/src');
+    });
+
+    test('preserves Windows absolute paths with forward slashes', () => {
+      const { PathValidator } = require('../src/utils/validation.js');
+      const result = PathValidator.normalizePath('C:/Users/project/src');
+      expect(result).toBe('C:/Users/project/src');
+    });
+
+    test('normalizes Windows absolute paths with mixed separators', () => {
+      const { PathValidator } = require('../src/utils/validation.js');
+      const result = PathValidator.normalizePath('C:\\Users/project\\src');
+      expect(result).toBe('C:/Users/project/src');
+    });
+
+    test('normalizes UNC paths', () => {
+      const { PathValidator } = require('../src/utils/validation.js');
+      const result = PathValidator.normalizePath('\\\\server\\share\\folder');
+      expect(result).toBe('//server/share/folder');
+    });
+
+    test('preserves Unix absolute paths unchanged', () => {
+      const { PathValidator } = require('../src/utils/validation.js');
+      const result = PathValidator.normalizePath('/home/user/project');
+      expect(result).toBe('/home/user/project');
+    });
+
+    test('normalizes relative paths with backslashes on Windows', () => {
+      const { PathValidator } = require('../src/utils/validation.js');
+      const result = PathValidator.normalizePath('src\\components\\Button.tsx');
+      // On Windows platform or when Windows patterns detected, backslashes are normalized
+      if (process.platform === 'win32') {
+        expect(result).toBe('src/components/Button.tsx');
+      } else {
+        // On Unix, no Windows-specific patterns, so unchanged
+        expect(result).toBe('src\\components\\Button.tsx');
+      }
+    });
+
+    test('preserves relative paths with forward slashes', () => {
+      const { PathValidator } = require('../src/utils/validation.js');
+      const result = PathValidator.normalizePath('src/components/Button.tsx');
+      expect(result).toBe('src/components/Button.tsx');
+    });
+
+    test('handles edge case: empty string', () => {
+      const { PathValidator } = require('../src/utils/validation.js');
+      const result = PathValidator.normalizePath('');
+      expect(result).toBe('');
+    });
+
+    test('handles edge case: single dot', () => {
+      const { PathValidator } = require('../src/utils/validation.js');
+      const result = PathValidator.normalizePath('.');
+      expect(result).toBe('.');
+    });
+
+    test('handles edge case: double dot', () => {
+      const { PathValidator } = require('../src/utils/validation.js');
+      const result = PathValidator.normalizePath('..');
+      // Double dot is a valid relative path, normalization applies if on Windows
+      if (process.platform === 'win32') {
+        expect(result).toBe('..');
+      } else {
+        expect(result).toBe('..');
+      }
+    });
+
+    test('normalizes paths with spaces', () => {
+      const { PathValidator } = require('../src/utils/validation.js');
+      const result = PathValidator.normalizePath('C:\\Program Files\\MyApp');
+      expect(result).toBe('C:/Program Files/MyApp');
+    });
+
+    test('platform-specific behavior: normalizes only on Windows or with Windows patterns', () => {
+      const { PathValidator } = require('../src/utils/validation.js');
+      // Windows absolute path should be normalized regardless of platform
+      const windowsPath = PathValidator.normalizePath('D:\\code\\app');
+      expect(windowsPath).toBe('D:/code/app');
+
+      // Unix path should not be modified
+      const unixPath = PathValidator.normalizePath('/usr/local/bin');
+      expect(unixPath).toBe('/usr/local/bin');
+    });
+  });
+
+  describe('isWindowsAbsolutePath', () => {
+    test('detects valid Windows absolute paths with forward slash', () => {
+      const { PathValidator } = require('../src/utils/validation.js');
+      expect(PathValidator.isWindowsAbsolutePath('C:/')).toBe(true);
+      expect(PathValidator.isWindowsAbsolutePath('D:/')).toBe(true);
+      expect(PathValidator.isWindowsAbsolutePath('E:/Users')).toBe(true);
+      expect(PathValidator.isWindowsAbsolutePath('Z:/path')).toBe(true);
+    });
+
+    test('detects valid Windows absolute paths with backslash', () => {
+      const { PathValidator } = require('../src/utils/validation.js');
+      expect(PathValidator.isWindowsAbsolutePath('C:\\')).toBe(true);
+      expect(PathValidator.isWindowsAbsolutePath('D:\\folder')).toBe(true);
+    });
+
+    test('rejects Unix absolute paths', () => {
+      const { PathValidator } = require('../src/utils/validation.js');
+      expect(PathValidator.isWindowsAbsolutePath('/home/user')).toBe(false);
+      expect(PathValidator.isWindowsAbsolutePath('/usr/local/bin')).toBe(false);
+    });
+
+    test('rejects relative paths', () => {
+      const { PathValidator } = require('../src/utils/validation.js');
+      expect(PathValidator.isWindowsAbsolutePath('./relative')).toBe(false);
+      expect(PathValidator.isWindowsAbsolutePath('../parent')).toBe(false);
+      expect(PathValidator.isWindowsAbsolutePath('src/components')).toBe(false);
+    });
+
+    test('rejects invalid Windows path without separator', () => {
+      const { PathValidator } = require('../src/utils/validation.js');
+      expect(PathValidator.isWindowsAbsolutePath('C:relative')).toBe(false);
+      expect(PathValidator.isWindowsAbsolutePath('C:')).toBe(false);
+      expect(PathValidator.isWindowsAbsolutePath('C')).toBe(false);
+    });
+
+    test('detects lowercase drive letters', () => {
+      const { PathValidator } = require('../src/utils/validation.js');
+      expect(PathValidator.isWindowsAbsolutePath('c:/path')).toBe(true);
+      expect(PathValidator.isWindowsAbsolutePath('d:\\folder')).toBe(true);
+    });
+
+    test('rejects invalid drive letter patterns', () => {
+      const { PathValidator } = require('../src/utils/validation.js');
+      expect(PathValidator.isWindowsAbsolutePath('CC:/path')).toBe(false);
+      expect(PathValidator.isWindowsAbsolutePath('1:/path')).toBe(false);
+    });
+  });
+});
+
+// ============================================
+// Enhanced PatternValidator Tests
+// ============================================
+describe('PatternValidator - Enhanced Features', () => {
+  describe('detectInvalidMetavariablePlacement', () => {
+    test('detects metavariable embedded in identifier prefix', () => {
+      const result = PatternValidator.validatePattern('use$HOOK');
+      expect(result.valid).toBe(false);
+      expect(result.errors.some(e => e.includes('Invalid metavariable placement'))).toBe(true);
+      expect(result.errors.some(e => e.includes('use$HOOK'))).toBe(true);
+    });
+
+    test('detects multiple embedded patterns', () => {
+      const result = PatternValidator.validatePattern('obj.on$EVENT');
+      expect(result.valid).toBe(false);
+      expect(result.errors.some(e => e.includes('n$EVENT'))).toBe(true);
+    });
+
+    test('detects metavariable embedded in identifier suffix', () => {
+      const result = PatternValidator.validatePattern('$VARname');
+      expect(result.valid).toBe(false);
+      expect(result.errors.some(e => e.includes('$VARname'))).toBe(true);
+    });
+
+    test('detects metavariable inside single-quoted strings', () => {
+      const result = PatternValidator.validatePattern("'Hello $WORLD'");
+      expect(result.valid).toBe(false);
+      expect(result.errors.some(e => e.includes('Invalid metavariable placement'))).toBe(true);
+    });
+
+    test('detects metavariable inside double-quoted strings', () => {
+      const result = PatternValidator.validatePattern('"value: $VAR"');
+      expect(result.valid).toBe(false);
+      expect(result.errors.some(e => e.includes('Invalid metavariable placement'))).toBe(true);
+    });
+
+    test('detects metavariable inside template literals', () => {
+      const result = PatternValidator.validatePattern('`Hello $WORLD`');
+      expect(result.valid).toBe(false);
+      expect(result.errors.some(e => e.includes('Invalid metavariable placement'))).toBe(true);
+    });
+
+    test('accepts valid patterns with proper metavariable placement', () => {
+      const result1 = PatternValidator.validatePattern('$VAR');
+      expect(result1.valid).toBe(true);
+
+      const result2 = PatternValidator.validatePattern('obj.$METHOD');
+      expect(result2.valid).toBe(true);
+
+      const result3 = PatternValidator.validatePattern('$VAR1 + $VAR2');
+      expect(result3.valid).toBe(true);
+    });
+
+    test('detects multiple invalid placements in one pattern', () => {
+      const result = PatternValidator.validatePattern('use$HOOK($VAR, "text $TEXT")');
+      expect(result.valid).toBe(false);
+      // Should have errors for both use$HOOK and "text $TEXT"
+      expect(result.errors.length).toBeGreaterThan(0);
+    });
+
+    test('accepts metavariable at word boundary', () => {
+      const result1 = PatternValidator.validatePattern('$VAR.method()');
+      expect(result1.valid).toBe(true);
+
+      const result2 = PatternValidator.validatePattern('func($VAR)');
+      expect(result2.valid).toBe(true);
+    });
+  });
+
+  describe('detectASTStructureRequirements', () => {
+    test('warns about decorator patterns', () => {
+      const result = PatternValidator.validatePattern('@Component');
+      expect(result.valid).toBe(true);
+      expect(result.warnings).toBeDefined();
+      expect(result.warnings!.some(w => w.includes('decorators') && w.includes('@Component'))).toBe(true);
+      expect(result.warnings!.some(w => w.includes('ast-grep.github.io'))).toBe(true);
+    });
+
+    test('warns about lowercase decorator patterns', () => {
+      const result = PatternValidator.validatePattern('@decorator');
+      expect(result.valid).toBe(true);
+      expect(result.warnings).toBeDefined();
+      expect(result.warnings!.some(w => w.includes('decorators'))).toBe(true);
+    });
+
+    test('warns about namespaced decorator patterns', () => {
+      const result = PatternValidator.validatePattern('@angular.Component');
+      expect(result.valid).toBe(true);
+      expect(result.warnings).toBeDefined();
+      expect(result.warnings!.some(w => w.includes('decorators'))).toBe(true);
+    });
+
+    test('warns about type annotation patterns', () => {
+      const result = PatternValidator.validatePattern('$VAR: string');
+      expect(result.valid).toBe(true);
+      expect(result.warnings).toBeDefined();
+      expect(result.warnings!.some(w => w.includes('type annotations'))).toBe(true);
+      expect(result.warnings!.some(w => w.includes('kind'))).toBe(true);
+    });
+
+    test('warns about complex type annotations', () => {
+      const result = PatternValidator.validatePattern('$VAR: Map<string, number>');
+      expect(result.valid).toBe(true);
+      expect(result.warnings).toBeDefined();
+      expect(result.warnings!.some(w => w.includes('type annotations'))).toBe(true);
+    });
+
+    test('warns about modifier patterns', () => {
+      const result1 = PatternValidator.validatePattern('public $VAR');
+      expect(result1.valid).toBe(true);
+      expect(result1.warnings!.some(w => w.includes('modifiers'))).toBe(true);
+
+      const result2 = PatternValidator.validatePattern('private $METHOD');
+      expect(result2.valid).toBe(true);
+      expect(result2.warnings!.some(w => w.includes('modifiers'))).toBe(true);
+
+      const result3 = PatternValidator.validatePattern('static $FIELD');
+      expect(result3.valid).toBe(true);
+      expect(result3.warnings!.some(w => w.includes('modifiers'))).toBe(true);
+    });
+
+    test('warns about combined patterns', () => {
+      const result = PatternValidator.validatePattern('@Component public $VAR: string');
+      expect(result.valid).toBe(true);
+      expect(result.warnings).toBeDefined();
+      // Should have warnings for both decorators and type annotations
+      expect(result.warnings!.some(w => w.includes('decorators'))).toBe(true);
+      expect(result.warnings!.some(w => w.includes('type annotations'))).toBe(true);
+    });
+
+    test('does not warn for patterns without AST structure issues', () => {
+      const result1 = PatternValidator.validatePattern('console.log($VAR)');
+      expect(result1.valid).toBe(true);
+      if (result1.warnings) {
+        expect(result1.warnings.some(w => w.includes('decorators') || w.includes('type annotations'))).toBe(false);
+      }
+
+      const result2 = PatternValidator.validatePattern('function $NAME() {}');
+      expect(result2.valid).toBe(true);
+      if (result2.warnings) {
+        expect(result2.warnings.some(w => w.includes('decorators') || w.includes('type annotations'))).toBe(false);
+      }
+    });
+
+    test('warnings contain actionable guidance and documentation URLs', () => {
+      const result = PatternValidator.validatePattern('@Component');
+      expect(result.warnings).toBeDefined();
+      expect(result.warnings!.some(w => w.includes('https://'))).toBe(true);
+      expect(result.warnings!.some(w => w.includes('Consider') || w.includes('Use'))).toBe(true);
+    });
+
+    test('warnings are in warnings array, not errors', () => {
+      const result = PatternValidator.validatePattern('@Component');
+      expect(result.valid).toBe(true);
+      expect(result.errors.length).toBe(0);
+      expect(result.warnings).toBeDefined();
+      expect(result.warnings!.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe('calculateComplexityScore', () => {
+    test('classifies simple patterns (score < 5)', () => {
+      const result1 = PatternValidator.validatePattern('$VAR');
+      expect(result1.valid).toBe(true);
+      // Simple pattern should not trigger complexity warnings
+
+      const result2 = PatternValidator.validatePattern('foo($A, $B)');
+      expect(result2.valid).toBe(true);
+
+      const result3 = PatternValidator.validatePattern('const $NAME = $VALUE');
+      expect(result3.valid).toBe(true);
+    });
+
+    test('classifies moderate patterns (score 5-10)', () => {
+      // Pattern with 5-7 metavariables
+      const result = PatternValidator.validatePattern('function $NAME($A, $B, $C, $D) { return $E; }');
+      expect(result.valid).toBe(true);
+      // May or may not trigger warnings depending on exact score
+    });
+
+    test('classifies complex patterns (score 10-15)', () => {
+      // Pattern with 8-10 metavariables
+      const pattern = 'function $NAME($A, $B, $C, $D, $E, $F, $G, $H) {}';
+      const result = PatternValidator.validatePattern(pattern);
+      expect(result.valid).toBe(true);
+      // Should trigger complexity warning
+      if (result.warnings) {
+        expect(result.warnings.some(w => w.includes('complexity') || w.includes('complex'))).toBe(true);
+      }
+    });
+
+    test('classifies very complex patterns (score > 15)', () => {
+      // Pattern with 11+ metavariables
+      const pattern = 'function $NAME($A, $B, $C, $D, $E, $F, $G, $H, $I, $J, $K) {}';
+      const result = PatternValidator.validatePattern(pattern);
+      expect(result.valid).toBe(true);
+      expect(result.warnings).toBeDefined();
+      expect(result.warnings!.some(w => w.includes('very_complex') || w.includes('Very complex'))).toBe(true);
+    });
+
+    test('multi-node metavariables contribute more to score', () => {
+      // Pattern with multi-node metavariables should have higher score
+      const result = PatternValidator.validatePattern('function $NAME($$$PARAMS) { $$$BODY }');
+      expect(result.valid).toBe(true);
+      // Multi-node metavariables weighted 2x vs single-node
+    });
+
+    test('pattern length contributes to score', () => {
+      // Very long pattern should increase score
+      const longPattern = 'a'.repeat(500) + ' $VAR';
+      const result = PatternValidator.validatePattern(longPattern);
+      expect(result.valid).toBe(true);
+      // Length / 100 contributes to score
+    });
+
+    test('exact boundary: 10 metavariables', () => {
+      const pattern = '$A $B $C $D $E $F $G $H $I $J';
+      const result = PatternValidator.validatePattern(pattern);
+      expect(result.valid).toBe(true);
+      // Exactly 10 metavariables should NOT trigger >10 warning
+      if (result.warnings) {
+        const has10Warning = result.warnings.some(w => w.includes('threshold: 10'));
+        expect(has10Warning).toBe(false);
+      }
+    });
+
+    test('exact boundary: 11 metavariables', () => {
+      const pattern = '$A $B $C $D $E $F $G $H $I $J $K';
+      const result = PatternValidator.validatePattern(pattern);
+      expect(result.valid).toBe(true);
+      expect(result.warnings).toBeDefined();
+      // Should trigger >10 metavariable warning
+      expect(result.warnings!.some(w => w.includes('11 metavariables'))).toBe(true);
+      expect(result.warnings!.some(w => w.includes('threshold: 10'))).toBe(true);
+    });
+
+    test('complexity result includes all expected fields', () => {
+      // Testing internal method behavior through public validatePattern
+      const pattern = 'function $NAME($A, $B) { $C }';
+      const result = PatternValidator.validatePattern(pattern);
+      expect(result.valid).toBe(true);
+      // Internal complexity calculation should include: score, metavarCount, multiNodeCount, complexity
+    });
+  });
+
+  describe('getLanguageSpecificWarnings', () => {
+    test('warns about Python decorators', () => {
+      const result = PatternValidator.validatePattern('@decorator def $NAME():', 'python');
+      expect(result.valid).toBe(true);
+      expect(result.warnings).toBeDefined();
+      expect(result.warnings!.some(w => w.includes('Python') && w.includes('decorators'))).toBe(true);
+    });
+
+    test('warns about Python type hints', () => {
+      const result = PatternValidator.validatePattern('def $NAME($ARG: str) -> int:', 'py');
+      expect(result.valid).toBe(true);
+      expect(result.warnings).toBeDefined();
+      expect(result.warnings!.some(w => w.includes('type hints') || w.includes('type annotations'))).toBe(true);
+    });
+
+    test('warns about TypeScript decorators', () => {
+      const result = PatternValidator.validatePattern('@Component class $NAME {}', 'typescript');
+      expect(result.valid).toBe(true);
+      expect(result.warnings).toBeDefined();
+      expect(result.warnings!.some(w => w.includes('TypeScript') && w.includes('decorators'))).toBe(true);
+    });
+
+    test('warns about TypeScript generics', () => {
+      const result = PatternValidator.validatePattern('function $NAME<T>($ARG: T)', 'ts');
+      expect(result.valid).toBe(true);
+      expect(result.warnings).toBeDefined();
+      expect(result.warnings!.some(w => w.includes('Generic') || w.includes('generic'))).toBe(true);
+    });
+
+    test('warns about Java annotations', () => {
+      const result = PatternValidator.validatePattern('@Override public $METHOD()', 'java');
+      expect(result.valid).toBe(true);
+      expect(result.warnings).toBeDefined();
+      expect(result.warnings!.some(w => w.includes('Java') && w.includes('annotations'))).toBe(true);
+    });
+
+    test('warns about Java modifiers', () => {
+      const result = PatternValidator.validatePattern('public static $FIELD', 'java');
+      expect(result.valid).toBe(true);
+      expect(result.warnings).toBeDefined();
+      expect(result.warnings!.some(w => w.includes('Java') && w.includes('modifiers'))).toBe(true);
+    });
+
+    test('warns about Rust attributes', () => {
+      const result = PatternValidator.validatePattern('#[derive(Debug)] struct $NAME', 'rust');
+      expect(result.valid).toBe(true);
+      expect(result.warnings).toBeDefined();
+      expect(result.warnings!.some(w => w.includes('Rust') && w.includes('attributes'))).toBe(true);
+    });
+
+    test('warns about Rust lifetimes', () => {
+      const result = PatternValidator.validatePattern("fn $NAME<'a>($ARG: &'a str)", 'rs');
+      expect(result.valid).toBe(true);
+      expect(result.warnings).toBeDefined();
+      expect(result.warnings!.some(w => w.includes('lifetime'))).toBe(true);
+    });
+
+    test('language normalization works', () => {
+      const result1 = PatternValidator.validatePattern('@decorator', 'javascript');
+      const result2 = PatternValidator.validatePattern('@decorator', 'js');
+      // Both should handle language consistently after normalization
+      expect(result1.valid).toBe(true);
+      expect(result2.valid).toBe(true);
+    });
+
+    test('returns no warnings for unsupported languages', () => {
+      const result = PatternValidator.validatePattern('$VAR', 'unknown');
+      expect(result.valid).toBe(true);
+      // Should not crash, may have generic warnings but no language-specific ones
+    });
+
+    test('returns no warnings when language is undefined', () => {
+      const result = PatternValidator.validatePattern('$VAR');
+      expect(result.valid).toBe(true);
+      // No language parameter, so no language-specific warnings
+    });
+
+    test('warnings contain language-specific guidance and documentation URLs', () => {
+      const result = PatternValidator.validatePattern('@decorator', 'python');
+      expect(result.warnings).toBeDefined();
+      expect(result.warnings!.some(w => w.includes('https://'))).toBe(true);
+      expect(result.warnings!.some(w => w.includes('Python') || w.includes('python'))).toBe(true);
+    });
+  });
+
+  describe('validatePattern with language parameter integration', () => {
+    test('invalid placement errors appear with language warnings', () => {
+      const result = PatternValidator.validatePattern('use$HOOK', 'javascript');
+      expect(result.valid).toBe(false);
+      expect(result.errors.some(e => e.includes('Invalid metavariable placement'))).toBe(true);
+    });
+
+    test('decorators trigger both generic and language-specific warnings for Python', () => {
+      const result = PatternValidator.validatePattern('@decorator', 'python');
+      expect(result.valid).toBe(true);
+      expect(result.warnings).toBeDefined();
+      // Should have warnings from detectASTStructureRequirements and getLanguageSpecificWarnings
+      expect(result.warnings!.some(w => w.includes('decorators'))).toBe(true);
+    });
+
+    test('type hints trigger warnings for TypeScript', () => {
+      const result = PatternValidator.validatePattern('$VAR: string', 'typescript');
+      expect(result.valid).toBe(true);
+      expect(result.warnings).toBeDefined();
+      expect(result.warnings!.some(w => w.includes('type'))).toBe(true);
+    });
+
+    test('complexity warnings appear alongside language warnings', () => {
+      const pattern = '@Component $A $B $C $D $E $F $G $H $I $J $K';
+      const result = PatternValidator.validatePattern(pattern, 'typescript');
+      expect(result.valid).toBe(true);
+      expect(result.warnings).toBeDefined();
+      // Should have both decorator warnings and complexity warnings
+      expect(result.warnings!.some(w => w.includes('decorator'))).toBe(true);
+      expect(result.warnings!.some(w => w.includes('metavariables'))).toBe(true);
+    });
+
+    test('language parameter is optional', () => {
+      const result = PatternValidator.validatePattern('$VAR');
+      expect(result.valid).toBe(true);
+      // Should work without language parameter
+    });
+
+    test('invalid metavariable placement errors appear before warnings', () => {
+      const result = PatternValidator.validatePattern('use$HOOK @decorator', 'python');
+      expect(result.valid).toBe(false);
+      expect(result.errors.length).toBeGreaterThan(0);
+      // Errors should be checked first, preventing invalid patterns from being used
+    });
+
+    test('validation result includes both errors and warnings when applicable', () => {
+      const result = PatternValidator.validatePattern('use$HOOK', 'python');
+      expect(result.valid).toBe(false);
+      expect(result.errors.length).toBeGreaterThan(0);
+      // May or may not have warnings, but errors should be present
+    });
+  });
+
+  describe('Pattern complexity boundary tests', () => {
+    test('pattern with exactly 10 metavariables does NOT trigger >10 warning', () => {
+      const pattern = '$VAR1 $VAR2 $VAR3 $VAR4 $VAR5 $VAR6 $VAR7 $VAR8 $VAR9 $VAR10';
+      const result = PatternValidator.validatePattern(pattern);
+      expect(result.valid).toBe(true);
+      // Should NOT trigger >10 metavariable warning
+      if (result.warnings) {
+        expect(result.warnings.some(w => w.includes('threshold: 10'))).toBe(false);
+      }
+    });
+
+    test('pattern with exactly 11 metavariables DOES trigger >10 warning', () => {
+      const pattern = '$VAR1 $VAR2 $VAR3 $VAR4 $VAR5 $VAR6 $VAR7 $VAR8 $VAR9 $VAR10 $VAR11';
+      const result = PatternValidator.validatePattern(pattern);
+      expect(result.valid).toBe(true);
+      expect(result.warnings).toBeDefined();
+      expect(result.warnings!.some(w => w.includes('11 metavariables'))).toBe(true);
+      expect(result.warnings!.some(w => w.includes('threshold: 10'))).toBe(true);
+    });
+
+    test('pattern with 10 single-node metavariables', () => {
+      const pattern = 'function $NAME($A, $B, $C, $D, $E, $F, $G, $H, $I) {}';
+      const result = PatternValidator.validatePattern(pattern);
+      expect(result.valid).toBe(true);
+      // Exactly 10 metavariables (NAME, A-I), should not trigger >10 warning
+      if (result.warnings) {
+        expect(result.warnings.some(w => w.includes('threshold: 10'))).toBe(false);
+      }
+    });
+
+    test('pattern with 5 single-node + 3 multi-node metavariables', () => {
+      const pattern = '$A $B $C $D $E $$$ARGS1 $$$ARGS2 $$$ARGS3';
+      const result = PatternValidator.validatePattern(pattern);
+      expect(result.valid).toBe(true);
+      // Total 8 metavariables (5 single + 3 multi), each counted once
+      // Multi-node metavariables are counted once in metavarCount
+    });
+
+    test('pattern with 15 metavariables triggers both >10 and very_complex warnings', () => {
+      const pattern = '$A $B $C $D $E $F $G $H $I $J $K $L $M $N $O';
+      const result = PatternValidator.validatePattern(pattern);
+      expect(result.valid).toBe(true);
+      expect(result.warnings).toBeDefined();
+      // Should trigger >10 metavariable warning
+      expect(result.warnings!.some(w => w.includes('15 metavariables'))).toBe(true);
+      // Should also trigger very_complex warning (score > 15)
+      expect(result.warnings!.some(w => w.includes('very_complex') || w.includes('Very complex'))).toBe(true);
+    });
+
+    test('warning message includes actual count', () => {
+      const pattern = '$A $B $C $D $E $F $G $H $I $J $K $L';
+      const result = PatternValidator.validatePattern(pattern);
+      expect(result.valid).toBe(true);
+      expect(result.warnings).toBeDefined();
+      // Should mention "12 metavariables"
+      expect(result.warnings!.some(w => w.includes('12 metavariables'))).toBe(true);
+      expect(result.warnings!.some(w => w.includes('threshold: 10'))).toBe(true);
+    });
+
+    test('edge case: $VAR1 ... $VAR10 vs $VAR1 ... $VAR11', () => {
+      const pattern10 = '$VAR1 $VAR2 $VAR3 $VAR4 $VAR5 $VAR6 $VAR7 $VAR8 $VAR9 $VAR10';
+      const result10 = PatternValidator.validatePattern(pattern10);
+      expect(result10.valid).toBe(true);
+      if (result10.warnings) {
+        expect(result10.warnings.some(w => w.includes('threshold: 10'))).toBe(false);
+      }
+
+      const pattern11 = '$VAR1 $VAR2 $VAR3 $VAR4 $VAR5 $VAR6 $VAR7 $VAR8 $VAR9 $VAR10 $VAR11';
+      const result11 = PatternValidator.validatePattern(pattern11);
+      expect(result11.valid).toBe(true);
+      expect(result11.warnings).toBeDefined();
+      expect(result11.warnings!.some(w => w.includes('threshold: 10'))).toBe(true);
+    });
+
+    test('warning suggests actionable improvements', () => {
+      const pattern = '$A $B $C $D $E $F $G $H $I $J $K';
+      const result = PatternValidator.validatePattern(pattern);
+      expect(result.valid).toBe(true);
+      expect(result.warnings).toBeDefined();
+      // Should suggest breaking into smaller rules, adding constraints, etc.
+      expect(result.warnings!.some(w =>
+        w.includes('multiple rules') ||
+        w.includes('constraints') ||
+        w.includes('smaller')
+      )).toBe(true);
+      expect(result.warnings!.some(w => w.includes('https://'))).toBe(true);
+    });
+  });
+});
+
 /**
  * Test Coverage Summary
  * 

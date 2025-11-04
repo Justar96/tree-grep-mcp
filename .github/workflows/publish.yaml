@@ -1,0 +1,131 @@
+name: Publish to npm and Bun
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to publish (e.g., v1.0.0)'
+        required: false
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Run tests
+        run: bun test --bail
+        continue-on-error: false
+
+      - name: Build project
+        run: bun run build
+
+      - name: Verify build output
+        run: |
+          if [ ! -f "build/index.js" ]; then
+            echo "Build failed: build/index.js not found"
+            exit 1
+          fi
+          echo "Build output verified"
+
+      - name: Extract version from tag
+        id: get_version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.tag }}" ]; then
+            VERSION="${{ github.event.inputs.tag }}"
+          else
+            VERSION="${GITHUB_REF#refs/tags/}"
+          fi
+          VERSION="${VERSION#v}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Publishing version: $VERSION"
+
+      - name: Verify package.json version matches tag
+        run: |
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
+          TAG_VERSION="${{ steps.get_version.outputs.version }}"
+          echo "Package version: $PACKAGE_VERSION"
+          echo "Tag version: $TAG_VERSION"
+          if [ "$PACKAGE_VERSION" != "$TAG_VERSION" ]; then
+            echo "Error: package.json version ($PACKAGE_VERSION) does not match tag version ($TAG_VERSION)"
+            exit 1
+          fi
+
+      - name: Publish to npm
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish to Bun registry
+        if: success()
+        run: |
+          # Configure Bun registry authentication
+          bunx jsr publish --allow-dirty || echo "Bun registry publish skipped (optional)"
+        env:
+          BUN_REGISTRY_TOKEN: ${{ secrets.BUN_REGISTRY_TOKEN }}
+        continue-on-error: true
+
+      - name: Create GitHub Release
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ steps.get_version.outputs.version }}
+          body: |
+            Release of @cabbages/tree-grep version ${{ steps.get_version.outputs.version }}
+
+            ## Installation
+
+            **Via npm:**
+            ```bash
+            npm install -g @cabbages/tree-grep
+            ```
+
+            **Via npx (no install):**
+            ```bash
+            npx @cabbages/tree-grep
+            ```
+
+            **Via Bun:**
+            ```bash
+            bun install -g @cabbages/tree-grep
+            ```
+
+            ## What's Changed
+            - Expanded language support (Python, Rust, Go, Java, C++, Kotlin)
+            - Enhanced documentation with JSX/TSX guidance
+            - Improved temp file handling for inline code
+            - Standardized skippedLines reporting
+            - Added comprehensive MCP→CLI parameter mapping
+
+            See [CHANGELOG.md](https://github.com/justar96/tree-grep-mcp/blob/main/CHANGELOG.md) for full details.
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

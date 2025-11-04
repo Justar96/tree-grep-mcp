@@ -4,7 +4,7 @@ import * as os from 'os';
 import { AstGrepBinaryManager } from '../core/binary-manager.js';
 import { WorkspaceManager } from '../core/workspace-manager.js';
 import { ValidationError, ExecutionError } from '../types/errors.js';
-import { PatternValidator, YamlValidator, ParameterValidator } from '../utils/validation.js';
+import { PatternValidator, YamlValidator, ParameterValidator, PathValidator } from '../utils/validation.js';
 
 /**
  * Rule builder that generates YAML and runs ast-grep scan
@@ -37,7 +37,7 @@ export class ScanTool {
     }
 
     // Validate pattern
-    const patternValidation = PatternValidator.validatePattern(params.pattern);
+    const patternValidation = PatternValidator.validatePattern(params.pattern, params.language);
     if (!patternValidation.valid) {
       throw new ValidationError(
         `Invalid pattern: ${patternValidation.errors.join('; ')}`,
@@ -70,6 +70,18 @@ export class ScanTool {
         typescript: 'ts',
         jsx: 'jsx',
         tsx: 'tsx',
+        python: 'py',
+        py: 'py',
+        rust: 'rs',
+        rs: 'rs',
+        golang: 'go',
+        go: 'go',
+        java: 'java',
+        'c++': 'cpp',
+        cpp: 'cpp',
+        c: 'c',
+        kotlin: 'kt',
+        kt: 'kt',
       };
       const lower = (lang || '').toLowerCase();
       return map[lower] || lang;
@@ -87,18 +99,22 @@ export class ScanTool {
     try {
       await fs.writeFile(rulesFile, yaml, 'utf8');
 
-      // Build scan command
-      const args = ['scan', '--rule', rulesFile, '--json=stream'];
+      // Build scan command (normalize rule file path for ast-grep)
+      const args = ['scan', '--rule', PathValidator.normalizePath(rulesFile), '--json=stream'];
 
       // Add paths or inline code via temp file
       let tempCodeFile: string | null = null;
       if (params.code) {
-        const extMap: Record<string, string> = { js: 'js', ts: 'ts', jsx: 'jsx', tsx: 'tsx' };
+        const extMap: Record<string, string> = {
+          js: 'js', ts: 'ts', jsx: 'jsx', tsx: 'tsx',
+          py: 'py', rs: 'rs', go: 'go', java: 'java',
+          cpp: 'cpp', c: 'c', kt: 'kt'
+        };
         const ext = extMap[normalizeLang(params.language)] || 'js';
         const randomSuffix = Math.random().toString(36).substring(2, 15);
         tempCodeFile = path.join(os.tmpdir(), `astgrep-inline-${Date.now()}-${randomSuffix}.${ext}`);
         await fs.writeFile(tempCodeFile, params.code, 'utf8');
-        args.push(tempCodeFile);
+        args.push(PathValidator.normalizePath(tempCodeFile));
         tempCodeFileForCleanup = tempCodeFile;
       } else {
         const inputPaths: string[] = params.paths && Array.isArray(params.paths) && params.paths.length > 0 ? params.paths : ['.'];
@@ -118,6 +134,7 @@ export class ScanTool {
 
       const resultObj = {
         yaml,
+        skippedLines,
         scan: {
           findings,
           summary: {
@@ -170,7 +187,7 @@ export class ScanTool {
 
     // Add simple constraints if provided
     if (params.where && params.where.length > 0) {
-      lines.push('  constraints:');
+      lines.push('constraints:');
       for (const constraint of params.where) {
         // Validate that metavariable exists in pattern
         if (!patternMetavars.has(constraint.metavariable)) {
@@ -190,12 +207,12 @@ export class ScanTool {
           );
         }
 
-        lines.push(`    ${constraint.metavariable}:`);
+        lines.push(`  ${constraint.metavariable}:`);
         if (hasRegex) {
-          lines.push(`      regex: ${YamlValidator.escapeYamlString(constraint.regex)}`);
+          lines.push(`    regex: ${YamlValidator.escapeYamlString(constraint.regex)}`);
         } else if (hasEquals) {
           const escaped = constraint.equals.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-          lines.push(`      regex: ${YamlValidator.escapeYamlString('^' + escaped + '$')}`);
+          lines.push(`    regex: ${YamlValidator.escapeYamlString('^' + escaped + '$')}`);
         }
       }
     }
@@ -283,6 +300,13 @@ This tool generates YAML rules with the following components:
 5. pattern: AST pattern to match
 6. constraints (optional): Filter matches based on metavariable content
 7. fix (optional): Suggested replacement code
+
+METAVARIABLE RULES:
+1. $_ (anonymous) cannot be referenced in constraints or fix templates - use only for matching
+2. $NAME must be used as a complete AST node unit and must be named (not bare $)
+3. All metavariables must correspond to complete, valid AST nodes in the target language
+4. Multi-node $$$NAME must always be named - bare $$$ is rejected
+5. Metavariables used in constraints or fix must exist in the pattern
 
 CONSTRAINT EXAMPLES:
 
@@ -398,20 +422,60 @@ COMPLETE EXAMPLES:
 OUTPUT FORMAT:
 Returns both the generated YAML rule and scan results:
 • yaml: The generated YAML rule (can be saved for reuse)
+• skippedLines: Top-level count of any malformed output lines that were skipped during parsing
 • scan.findings: Array of matches with file, line, column, message
-• scan.summary: Statistics (total findings, errors, warnings)
+• scan.summary: Statistics (total findings, errors, warnings, skippedLines)
+
+RESULT HANDLING:
+• All findings are returned (no truncation limit like ast_search)
+• summary.totalFindings reports the complete count
+• summary.errors and summary.warnings break down findings by severity
+• summary.skippedLines indicates any malformed output lines that were skipped
+• skippedLines is available both at top-level and in summary for consistency
+• For large result sets, consider narrowing paths or adding more specific constraints
+
+PATH VALIDATION:
+• All paths are validated to be within the workspace root (prevents directory escape attacks)
+• Omitting paths parameter defaults to current workspace root directory (".")
+• Paths can be relative (e.g., "src/") or absolute (must be within workspace)
+• Invalid paths (outside workspace, non-existent) will fail with ValidationError
+• Example: paths: ["src/", "tests/"] scans two directories
+• Example: omit paths entirely to scan the entire workspace
 
 MODES OF OPERATION:
 
 1. Inline Code Mode (for testing):
-   - Use code parameter
-   - Quick validation of rule logic
-   - Example: { ..., code: "var x = 1; const y = 2;" }
+   - Use code parameter to test rules on code snippets
+   - **IMPORTANT: Language is REQUIRED (in the rule parameters) when using inline code mode**
+   - Quick validation of rule logic before scanning files
+   - Minimal working example:
+     {
+       id: "no-var",
+       pattern: "var $NAME = $VALUE",
+       language: "javascript",
+       code: "var x = 1; const y = 2;"
+     }
+   - Language is a required parameter for all rules, so inline mode always has language specified
 
 2. File/Directory Mode (for scanning):
    - Use paths parameter or omit for current directory
+   - Language must be specified in rule parameters
    - Scans actual codebase
-   - Example: { ..., paths: ["src/", "lib/"] }
+   - Example: {
+       id: "no-var",
+       pattern: "var $NAME = $VALUE",
+       language: "javascript",
+       paths: ["src/", "lib/"]
+     }
+
+JSX/TSX PATTERN MATCHING:
+When creating rules for JSX/TSX code, set language to 'jsx' or 'tsx':
+• Match elements: "<$COMPONENT $$$ATTRS>" or "<$TAG>$$$CHILDREN</$TAG>"
+• Match attribute names: "<div $ATTR={$VALUE}>"
+• Match attribute values: "<Button onClick={$HANDLER}>"
+• Example: { pattern: "<$COMPONENT className={$CLASS}>", language: "jsx" }
+• WARNING: Overly broad patterns like "<$TAG>" can match thousands of elements in large codebases
+• RECOMMENDATION: Use constraints to filter specific component names or attribute values
 
 BEST PRACTICES:
 • Start with simple pattern, add constraints incrementally
@@ -420,6 +484,37 @@ BEST PRACTICES:
 • Provide clear, actionable messages
 • Test fix templates thoroughly before relying on them
 • Use appropriate severity levels
+
+MCP→CLI PARAMETER MAPPING:
+This tool generates a YAML rule file and maps MCP parameters to ast-grep CLI flags:
+• id, language, pattern, severity, message, where, fix → YAML rule file (temp)
+• paths → positional arguments (file/directory paths)
+• code → temp file with appropriate extension
+• timeoutMs → process timeout (not a CLI flag)
+• Output format: --json=stream
+
+Example CLI equivalent:
+  MCP: { id: "no-var", pattern: "var $N = $V", language: "js", paths: ["src/"] }
+  YAML: Generated temporary rule file with id, pattern, language, etc.
+  CLI: ast-grep scan --rule <temp-rule.yml> --json=stream src/
+
+TIMEOUT GUIDANCE:
+• Default timeout: 30000ms (30 seconds)
+• Timeouts include YAML generation, file parsing, rule execution, and I/O operations
+• Recommended timeouts by repo size:
+  - Small repos (<1000 files): 30000ms (default)
+  - Medium repos (1000-10000 files): 60000-120000ms
+  - Large repos (>10000 files): 120000-300000ms
+• If timeouts occur: narrow paths, specify language, or simplify pattern/constraints
+• Maximum allowed: 300000ms (5 minutes)
+
+YAML GENERATION DETAILS:
+• All strings (patterns, messages, regex) are safely double-quoted and escaped
+• Special YAML characters (: [ ] { } # " ' etc.) are automatically escaped
+• Newlines and quotes within strings are handled correctly
+• IMPORTANT: 'equals' constraints are converted to anchored regex (^value$) internally
+• Example: { equals: "console" } becomes regex: "^console$" in YAML
+• This conversion ensures exact matching while using ast-grep's regex constraint system
 
 LIMITATIONS:
 • Constraints only support regex and equals matching

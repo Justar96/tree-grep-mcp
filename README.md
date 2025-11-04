@@ -11,7 +11,7 @@ Add to your MCP settings:
   "mcpServers": {
     "tree-ast-grep": {
       "command": "npx",
-      "args": ["-y", "tree-grep-mcp", "--auto-install"]
+      "args": ["-y", "@cabbages/tree-grep", "--auto-install"]
     }
   }
 }
@@ -23,7 +23,7 @@ Add to your MCP settings:
   "mcpServers": {
     "tree-ast-grep": {
       "command": "bunx",
-      "args": ["tree-grep-mcp", "--auto-install"]
+      "args": ["@cabbages/tree-grep", "--auto-install"]
     }
   }
 }
@@ -143,13 +143,13 @@ ast-grep scan --rule rule.yml file.js
 
 ```bash
 # Lightweight (requires system ast-grep)
-npx tree-grep-mcp --use-system
+npx @cabbages/tree-grep --use-system
 
 # Platform-specific binary
-npx tree-grep-mcp --platform=win32
+npx @cabbages/tree-grep --platform=win32
 
 # Auto-detect platform (recommended)
-npx tree-grep-mcp --auto-install
+npx @cabbages/tree-grep --auto-install
 ```
 
 ## 📝 Metavariable Guide

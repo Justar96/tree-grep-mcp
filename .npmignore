@@ -1,0 +1,86 @@
+# Test files and directories
+test-repos/
+tests/
+*.test.ts
+*.test.js
+
+# Bun cache (very important!)
+.bun-cache/
+bun.lockb
+
+# Scripts and automation
+scripts/
+
+# GitHub workflows and templates
+.github/
+.claude/
+
+# Source files (we only need build output)
+src/
+
+# Documentation files (keep README.md, LICENSE)
+CHANGELOG.md
+GITHUB_ACTIONS_SETUP_COMPLETE.md
+MCP_USAGE.md
+MANUAL_TEST_RESULTS.md
+TEST_RESULTS_SUMMARY.md
+
+# Development files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# TypeScript config (not needed in published package)
+tsconfig.json
+
+# Environment variables
+.env
+.env.*
+
+# Logs
+*.log
+logs/
+
+# Coverage
+coverage/
+.nyc_output/
+*.lcov
+
+# Build artifacts that aren't needed
+*.tsbuildinfo
+.tsbuildinfo
+
+# Git files
+.gitignore
+.gitattributes
+
+# CI/CD
+.travis.yml
+.gitlab-ci.yml
+appveyor.yml
+
+# Editor config
+.editorconfig
+.prettierrc
+.prettierignore
+.eslintrc
+.eslintignore
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# OS files
+Thumbs.db
+desktop.ini
+
+# Test outputs
+test-results/
+test-output/
+cli-test-output/
+test-metrics.csv
+test-results.json

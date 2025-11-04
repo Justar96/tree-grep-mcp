@@ -2,6 +2,7 @@ import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
 import * as path from 'path';
 import { SecurityError } from '../types/errors.js';
+import { PathValidator } from '../utils/validation.js';
 
 export interface WorkspaceConfig {
   root: string;
@@ -191,8 +192,20 @@ export class WorkspaceManager {
 
   validatePath(inputPath: string): { valid: boolean; resolvedPath: string; error?: string } {
     try {
-      // Resolve the path relative to workspace root
-      const resolvedPath = path.resolve(this.config.root, inputPath);
+      // Check for Windows absolute paths on non-Windows platforms
+      if (PathValidator.isWindowsAbsolutePath(inputPath) && process.platform !== 'win32') {
+        return {
+          valid: false,
+          resolvedPath: inputPath,
+          error: `Windows absolute path "${inputPath}" is not supported on non-Windows platforms. Use relative paths or POSIX absolute paths.`
+        };
+      }
+
+      // Normalize Windows paths to forward slashes for ast-grep compatibility
+      const normalizedInput = PathValidator.normalizePath(inputPath);
+
+      // Resolve the path relative to workspace root (using native separators for validation)
+      const resolvedPath = path.resolve(this.config.root, normalizedInput);
       const normalizedRoot = path.resolve(this.config.root);
       const relativeFromRoot = path.relative(normalizedRoot, resolvedPath);
 
@@ -208,7 +221,7 @@ export class WorkspaceManager {
       ) {
         return {
           valid: false,
-          resolvedPath,
+          resolvedPath: PathValidator.normalizePath(resolvedPath),
           error: `Path "${inputPath}" is outside workspace root`
         };
       }
@@ -218,7 +231,7 @@ export class WorkspaceManager {
         if (resolvedPath.startsWith(blockedPath)) {
           return {
             valid: false,
-            resolvedPath,
+            resolvedPath: PathValidator.normalizePath(resolvedPath),
             error: `Access to system directory "${inputPath}" is blocked`
           };
         }
@@ -231,21 +244,22 @@ export class WorkspaceManager {
       if (depth > this.config.maxDepth) {
         return {
           valid: false,
-          resolvedPath,
+          resolvedPath: PathValidator.normalizePath(resolvedPath),
           error: `Path depth (${depth}) exceeds maximum allowed depth (${this.config.maxDepth})`
         };
       }
 
+      // Return normalized path for ast-grep compatibility
       return {
         valid: true,
-        resolvedPath
+        resolvedPath: PathValidator.normalizePath(resolvedPath)
       };
 
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       return {
         valid: false,
-        resolvedPath: inputPath,
+        resolvedPath: PathValidator.normalizePath(inputPath),
         error: `Invalid path: ${errorMessage}`
       };
     }

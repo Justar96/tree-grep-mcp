@@ -18,7 +18,7 @@ export class SearchTool {
       throw new ValidationError('Pattern is required and must be a string');
     }
 
-    const patternValidation = PatternValidator.validatePattern(params.pattern);
+    const patternValidation = PatternValidator.validatePattern(params.pattern, params.language);
     if (!patternValidation.valid) {
       throw new ValidationError(
         `Invalid pattern: ${patternValidation.errors.join('; ')}`,
@@ -59,6 +59,18 @@ export class SearchTool {
         typescript: 'ts',
         jsx: 'jsx',
         tsx: 'tsx',
+        python: 'py',
+        py: 'py',
+        rust: 'rs',
+        rs: 'rs',
+        golang: 'go',
+        go: 'go',
+        java: 'java',
+        'c++': 'cpp',
+        cpp: 'cpp',
+        c: 'c',
+        kotlin: 'kt',
+        kt: 'kt',
       };
       const lower = (lang || '').toLowerCase();
       return map[lower] || lang;
@@ -98,7 +110,8 @@ export class SearchTool {
       const inputPaths: string[] = params.paths && Array.isArray(params.paths) && params.paths.length > 0 ? params.paths : ['.'];
       const { valid, resolvedPaths, errors } = this.workspaceManager.validatePaths(inputPaths);
       if (!valid) {
-        throw new ValidationError('Invalid paths', { errors });
+        const errorDetail = errors.length > 0 ? `: ${errors[0]}` : '';
+        throw new ValidationError(`Invalid paths${errorDetail}`, { errors });
       }
       // Try to infer language if not provided (based on extension of first path when it is a file)
       if (!params.language && resolvedPaths.length === 1) {
@@ -128,6 +141,7 @@ export class SearchTool {
     if (!stdout.trim()) {
       return {
         matches,
+        skippedLines: 0,
         summary: {
           totalMatches: 0,
           executionTime: 0,
@@ -165,6 +179,7 @@ export class SearchTool {
     const maxMatches = params.maxMatches || 100;
     return {
       matches: matches.slice(0, maxMatches),
+      skippedLines,
       summary: {
         totalMatches: matches.length,
         truncated: matches.length > maxMatches,
@@ -196,6 +211,12 @@ PATTERN SYNTAX GUIDE:
 • $$$NAME - matches zero or more nodes (MUST be named, never use bare $$$)
 • $_ - anonymous single match (when you don't need to reference it)
 
+METAVARIABLE RULES:
+1. $_ (anonymous) cannot be referenced in replacements or constraints - use only for matching
+2. $NAME must be used as a complete AST node unit and must be named (not bare $)
+3. All metavariables must correspond to complete, valid AST nodes in the target language
+4. Multi-node $$$NAME must always be named - bare $$$ is rejected
+
 COMMON PATTERNS BY USE CASE:
 1. Function calls with specific argument count:
    - Any args: "functionName($$$ARGS)"
@@ -221,6 +242,14 @@ COMMON PATTERNS BY USE CASE:
    - Property access: "$OBJ.$PROP"
    - Destructuring: "const { $$$PROPS } = $OBJ"
 
+PATH VALIDATION:
+• All paths are validated to be within the workspace root (prevents directory escape attacks)
+• Omitting paths parameter defaults to current workspace root directory (".")
+• Paths can be relative (e.g., "src/") or absolute (must be within workspace)
+• Invalid paths (outside workspace, non-existent) will fail with ValidationError
+• Example: paths: ["src/components", "lib/utils"] searches two directories
+• Example: omit paths entirely to search the entire workspace
+
 MODES OF OPERATION:
 1. File/Directory Mode (default):
    - Specify paths parameter or omit for current directory
@@ -229,15 +258,72 @@ MODES OF OPERATION:
 
 2. Inline Code Mode:
    - Use code parameter to search specific code snippet
-   - Language is REQUIRED in this mode
+   - **IMPORTANT: Language is REQUIRED in this mode - the tool will fail with ValidationError if omitted**
    - Useful for testing patterns before applying to codebase
-   - Example: { pattern: "foo($A)", code: "foo(1); bar(2);", language: "javascript" }
+   - Minimal working example:
+     {
+       pattern: "console.log($ARG)",
+       code: "console.log('test'); foo();",
+       language: "javascript"
+     }
+   - Without language parameter: ValidationError: "Language required for inline code"
+
+JSX/TSX PATTERN MATCHING:
+When searching JSX/TSX code, set language to 'jsx' or 'tsx':
+• Match elements: "<$COMPONENT $$$ATTRS>" or "<$TAG>$$$CHILDREN</$TAG>"
+• Match attribute names: "<div $ATTR={$VALUE}>"
+• Match attribute values: "<Button onClick={$HANDLER}>"
+• Example: pattern="<$COMPONENT className={$CLASS}>" matches "<Button className={styles.primary}>"
+• WARNING: Overly broad patterns like "<$TAG>" can match thousands of elements in large codebases
+• RECOMMENDATION: Add constraints or be specific with component/attribute patterns
 
 IMPORTANT LIMITATIONS:
 • Patterns match AST structure, not text - "foo" won't match "foobar"
 • Metavariables must be complete AST nodes - "$VAR.prop" won't work, use "$OBJ.$PROP"
 • Multi-node metavariables ($$$) MUST be named - bare $$$ is rejected
 • Pattern syntax is language-specific - JavaScript patterns won't work for Python
+
+RESULT TRUNCATION:
+• maxMatches parameter limits the number of returned items (default: 100)
+• summary.totalMatches reports the full count of all matches found
+• summary.truncated indicates whether results were truncated (true if totalMatches > maxMatches)
+• Recommended maxMatches by repo size:
+  - Small repos (<1000 files): 100-500
+  - Medium repos (1000-10000 files): 50-200
+  - Large repos (>10000 files): 20-100
+• Higher maxMatches increase memory usage and response size
+• Performance impact: Parsing all matches still occurs; truncation only affects data transfer
+
+OUTPUT FORMAT:
+• matches: Array of match objects with file, line, column, text, and context
+• skippedLines: Top-level count of any malformed output lines that were skipped during parsing
+• summary: Statistics object with totalMatches, truncated, skippedLines, executionTime
+• skippedLines is available both at top-level and in summary for consistency
+
+MCP→CLI PARAMETER MAPPING:
+This tool maps MCP parameters to ast-grep CLI flags as follows:
+• pattern → --pattern <value>
+• language → --lang <value>
+• code → --stdin (with stdin input)
+• paths → positional arguments (file/directory paths)
+• context → --context <number>
+• maxMatches → result slicing (not a CLI flag)
+• timeoutMs → process timeout (not a CLI flag)
+• Output format: --json=stream
+
+Example CLI equivalent:
+  MCP: { pattern: "console.log($ARG)", paths: ["src/"], language: "js", context: 2 }
+  CLI: ast-grep run --pattern "console.log($ARG)" --lang js --context 2 --json=stream src/
+
+TIMEOUT GUIDANCE:
+• Default timeout: 30000ms (30 seconds)
+• Timeouts include file parsing, pattern matching, and I/O operations
+• Recommended timeouts by repo size:
+  - Small repos (<1000 files): 30000ms (default)
+  - Medium repos (1000-10000 files): 60000-120000ms
+  - Large repos (>10000 files): 120000-300000ms
+• If timeouts occur: narrow paths, specify language, or use more specific patterns
+• Maximum allowed: 300000ms (5 minutes)
 
 PERFORMANCE TIPS:
 • Specify language when known (faster parsing)

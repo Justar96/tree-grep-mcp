@@ -50,9 +50,234 @@ export class PatternValidator {
   }
 
   /**
-   * Validate an ast-grep pattern for common issues
+   * Detect invalid metavariable placements within identifiers or strings
+   * @param pattern - The pattern to check
+   * @returns Array of problematic patterns found
    */
-  static validatePattern(pattern: string): ValidationResult {
+  private static detectInvalidMetavariablePlacement(pattern: string): string[] {
+    const problems = new Set<string>();
+
+    // Check for lowercase identifier before $ (catches "use$HOOK" but not "LOG($ARG)")
+    // Using lowercase ensures we detect embedded patterns, not function names followed by args
+    const beforeRegex = /[a-z][a-z0-9_]*\$[A-Z_][A-Z0-9_]*/g;
+    let match;
+    while ((match = beforeRegex.exec(pattern)) !== null) {
+      problems.add(match[0]);
+    }
+
+    // Check for lowercase letter immediately after metavariable (catches "$VARname" but not "$VAR1" or "$VAR)")
+    // Using lowercase (not digit) ensures we detect embedded patterns while allowing valid digit suffixes
+    const afterRegex = /\$[A-Z_][A-Z0-9_]*[a-z]/g;
+    while ((match = afterRegex.exec(pattern)) !== null) {
+      problems.add(match[0]);
+    }
+
+    // Check for metavariables inside string literals (separate regex for each quote type)
+    // Require at least 2 consecutive letters to avoid false positives with Rust lifetimes ('a)
+    const singleQuoteRegex = /'[^'\n]*[a-zA-Z]{2,}[^'\n]*\$[A-Z_][A-Z0-9_]*[^'\n]*'/g;
+    while ((match = singleQuoteRegex.exec(pattern)) !== null) {
+      problems.add(match[0]);
+    }
+
+    const doubleQuoteRegex = /"[^"\n]*[a-zA-Z]{2,}[^"\n]*\$[A-Z_][A-Z0-9_]*[^"\n]*"/g;
+    while ((match = doubleQuoteRegex.exec(pattern)) !== null) {
+      problems.add(match[0]);
+    }
+
+    const backtickRegex = /`[^`\n]*[a-zA-Z]{2,}[^`\n]*\$[A-Z_][A-Z0-9_]*[^`\n]*`/g;
+    while ((match = backtickRegex.exec(pattern)) !== null) {
+      problems.add(match[0]);
+    }
+
+    return Array.from(problems);
+  }
+
+  /**
+   * Detect patterns requiring exact AST structure
+   * @param pattern - The pattern to check
+   * @returns Array of warnings with specific guidance
+   */
+  private static detectASTStructureRequirements(pattern: string): string[] {
+    const warnings: string[] = [];
+
+    // Check for decorators
+    const decoratorRegex = /@[A-Za-z_][\w.]*/g;
+    if (decoratorRegex.test(pattern)) {
+      warnings.push(
+        'Pattern contains decorators (@Component, @decorator, etc.). Decorators require exact AST structure matching. ' +
+        'Consider using structural rules with \'kind\' and \'has\' constraints instead of simple patterns. ' +
+        'See: https://ast-grep.github.io/guide/rule-config.html'
+      );
+    }
+
+    // Check for type annotations
+    const typeRegex = /:\s*[^=,\)\n]+/g;
+    if (typeRegex.test(pattern)) {
+      warnings.push(
+        'Pattern contains type annotations. Type hints require exact AST structure. ' +
+        'Consider using \'kind\' rules to match type nodes. ' +
+        'See: https://ast-grep.github.io/reference/rule.html#kind'
+      );
+    }
+
+    // Check for modifiers
+    const modifierRegex = /(public|private|protected|static|final|const|readonly)\s+\$[A-Z_]/g;
+    if (modifierRegex.test(pattern)) {
+      warnings.push(
+        'Pattern contains modifiers with metavariables. Modifiers may not parse correctly in simple patterns. ' +
+        'Use structural rules with \'kind\' and \'has\' constraints. ' +
+        'See: https://ast-grep.github.io/guide/rule-config/atomic-rule.html#kind'
+      );
+    }
+
+    return warnings;
+  }
+
+  /**
+   * Calculate pattern complexity score based on metavariables and length
+   * @param pattern - The pattern to analyze
+   * @returns Complexity result with score, counts, and classification
+   */
+  private static calculateComplexityScore(pattern: string): {
+    score: number;
+    metavarCount: number;
+    multiNodeCount: number;
+    complexity: 'simple' | 'moderate' | 'complex' | 'very_complex';
+  } {
+    // Extract actual metavariables
+    const metavars = this.extractMetavariables(pattern);
+    const metavarCount = metavars.size;
+
+    // Count multi-node metavariables
+    const multiNodeRegex = /\$\$\$[A-Z_][A-Z0-9_]*/g;
+    const multiNodeMatches = pattern.match(multiNodeRegex) || [];
+    const multiNodeCount = multiNodeMatches.length;
+
+    // Calculate score
+    const score = metavarCount * 1 + multiNodeCount * 2 + pattern.length / 100;
+
+    // Classify complexity
+    let complexity: 'simple' | 'moderate' | 'complex' | 'very_complex';
+    if (score < 5) {
+      complexity = 'simple';
+    } else if (score < 8) {
+      complexity = 'moderate';
+    } else if (score < 11) {
+      complexity = 'complex';
+    } else {
+      complexity = 'very_complex';
+    }
+
+    return { score, metavarCount, multiNodeCount, complexity };
+  }
+
+  /**
+   * Get language-specific validation warnings
+   * @param pattern - The pattern to check
+   * @param language - The target programming language (optional)
+   * @returns Array of language-specific warnings
+   */
+  private static getLanguageSpecificWarnings(pattern: string, language?: string): string[] {
+    if (!language) return [];
+
+    const warnings: string[] = [];
+
+    // Normalize language aliases to match tool mappings
+    const langMap: Record<string, string> = {
+      javascript: 'js',
+      typescript: 'ts',
+      jsx: 'jsx',
+      tsx: 'tsx',
+      python: 'py',
+      py: 'py',
+      rust: 'rs',
+      rs: 'rs',
+      golang: 'go',
+      go: 'go',
+      java: 'java',
+      'c++': 'cpp',
+      cpp: 'cpp',
+      c: 'c',
+      kotlin: 'kt',
+      kt: 'kt',
+    };
+    const lower = language.toLowerCase();
+    const normalizedLang = langMap[lower] || language.toLowerCase();
+
+    // Python-specific checks
+    if (normalizedLang === 'py') {
+      if (/@[a-zA-Z]/.test(pattern)) {
+        warnings.push(
+          'Python decorators (@decorator) require exact AST structure. ' +
+          'Use structural rules for reliable matching. ' +
+          'See: https://ast-grep.github.io/guide/rule-config.html'
+        );
+      }
+      if (/:\s*[A-Z][a-zA-Z0-9_\[\]|]+/.test(pattern)) {
+        warnings.push(
+          'Python type hints require exact AST structure. ' +
+          'Consider using \'kind\' rules to match type annotation nodes.'
+        );
+      }
+    }
+
+    // TypeScript/TSX-specific checks
+    if (normalizedLang === 'ts' || normalizedLang === 'tsx') {
+      if (/@[A-Z][a-zA-Z0-9_]*/.test(pattern)) {
+        warnings.push(
+          'TypeScript decorators require exact AST structure. ' +
+          'Use structural rules with \'kind\' and \'has\' constraints for reliable matching.'
+        );
+      }
+      if (/<[A-Z][a-zA-Z0-9_]*>/.test(pattern) && !pattern.includes('</')) {
+        warnings.push(
+          'Generic type parameters may require structural rules for complex cases. ' +
+          'Test pattern thoroughly to ensure it matches intended constructs.'
+        );
+      }
+    }
+
+    // Java-specific checks
+    if (normalizedLang === 'java') {
+      if (/@[A-Z][a-zA-Z0-9_]*/.test(pattern)) {
+        warnings.push(
+          'Java annotations require exact AST structure. ' +
+          'Use structural rules with \'kind\' and \'has\' constraints instead of simple patterns.'
+        );
+      }
+      if (/(public|private|protected|static|final)\s+\$/.test(pattern)) {
+        warnings.push(
+          'Java modifiers with metavariables may not parse correctly. ' +
+          'Use structural rules to match field or method declarations reliably.'
+        );
+      }
+    }
+
+    // Rust-specific checks
+    if (normalizedLang === 'rs') {
+      if (/#\[[a-zA-Z]/.test(pattern)) {
+        warnings.push(
+          'Rust attributes (#[attribute]) require exact AST structure. ' +
+          'Use structural rules for reliable matching.'
+        );
+      }
+      if (/'[a-z]/.test(pattern)) {
+        warnings.push(
+          'Rust lifetime parameters may require structural rules for complex cases.'
+        );
+      }
+    }
+
+    return warnings;
+  }
+
+  /**
+   * Validate an ast-grep pattern for common issues
+   * @param pattern - The pattern to validate
+   * @param language - Optional language for language-specific validation
+   * @returns Validation result with errors and warnings
+   */
+  static validatePattern(pattern: string, language?: string): ValidationResult {
     const errors: string[] = [];
     const warnings: string[] = [];
     
@@ -61,11 +286,26 @@ export class PatternValidator {
       errors.push('Pattern cannot be empty');
       return { valid: false, errors, warnings };
     }
-    
+
+    // Detect invalid metavariable placements
+    const invalidPlacements = this.detectInvalidMetavariablePlacement(pattern);
+    for (const placement of invalidPlacements) {
+      errors.push(
+        `Invalid metavariable placement: "${placement}". ` +
+        `Metavariables must be complete AST nodes, not embedded in identifiers or strings. ` +
+        `Examples of invalid patterns: "obj.on$EVENT", "use$HOOK", "\"Hello $WORLD\"". ` +
+        `See: https://ast-grep.github.io/guide/pattern-syntax.html#meta-variable`
+      );
+    }
+
     // Check for bare $$$ (multi-node metavariable without name)
     const bareMultiRegex = /\$\$\$(?![A-Z_][A-Z0-9_]*)/g;
     if (bareMultiRegex.test(pattern)) {
-      errors.push('Use named multi-node metavariables like $$$BODY instead of bare $$$');
+      errors.push(
+        'Use named multi-node metavariables like $$$BODY instead of bare $$$. ' +
+        'Bare $$$ is ambiguous and not supported by ast-grep. ' +
+        'See: https://ast-grep.github.io/guide/pattern-syntax.html#multi-meta-variable'
+      );
     }
     
     // Check for invalid metavariable names
@@ -87,26 +327,57 @@ export class PatternValidator {
       if (!this.validateMetavariableName(name)) {
         errors.push(
           `Invalid metavariable name: ${metavar}. ` +
-          `Metavariables must be UPPER_CASE (e.g., $VAR, $MY_VAR, $$$ARGS). ` +
-          `Found: ${metavar}`
+          `Metavariables must be UPPER_CASE (e.g., $VAR, $MY_VAR, $ARGS). ` +
+          `Found: ${metavar}. ` +
+          `Valid examples: $NAME, $VALUE, $PARAMS. ` +
+          `See: https://ast-grep.github.io/guide/pattern-syntax.html#meta-variable-capturing`
         );
       }
+    }
+
+    // Detect AST structure requirements
+    const astWarnings = this.detectASTStructureRequirements(pattern);
+    warnings.push(...astWarnings);
+
+    // Add language-specific warnings if language is provided
+    if (language) {
+      const langWarnings = this.getLanguageSpecificWarnings(pattern, language);
+      warnings.push(...langWarnings);
     }
     
     // Check for common mistakes
     if (pattern.includes('$$$)') && !pattern.includes('($$$')) {
       warnings.push(
         'Multi-node metavariable $$$ appears at end of expression. ' +
-        'Ensure it is properly named (e.g., $$$ARGS) and positioned correctly.'
+        'Ensure it is properly named (e.g., $$$ARGS) and positioned correctly. ' +
+        'Multi-node metavariables match zero or more nodes and should be used in contexts that accept multiple elements. ' +
+        'See: https://ast-grep.github.io/guide/pattern-syntax.html#multi-meta-variable'
       );
     }
-    
-    // Warn about very complex patterns
-    const metavarCount = (pattern.match(/\$/g) || []).length;
-    if (metavarCount > 10) {
+
+    // Calculate accurate complexity score
+    const complexityResult = this.calculateComplexityScore(pattern);
+
+    // Explicit count-based warning for patterns with >10 metavariables
+    if (complexityResult.metavarCount > 10) {
       warnings.push(
-        `Pattern contains ${metavarCount} metavariables. ` +
-        `Very complex patterns may be harder to maintain and debug.`
+        `Pattern contains ${complexityResult.metavarCount} metavariables (threshold: 10). ` +
+        `Patterns with more than 10 metavariables are considered overly complex and hard to maintain. ` +
+        `Consider using multiple rules, adding constraints to narrow matches, or breaking the pattern into smaller components. ` +
+        `See: https://ast-grep.github.io/guide/rule-config.html`
+      );
+    }
+
+    if (complexityResult.complexity === 'complex') {
+      warnings.push(
+        `Pattern complexity: ${complexityResult.complexity} (${complexityResult.metavarCount} metavariables, score: ${complexityResult.score.toFixed(1)}). ` +
+        `complex patterns may be harder to maintain and debug. Consider breaking into smaller rules.`
+      );
+    } else if (complexityResult.complexity === 'very_complex') {
+      warnings.push(
+        `Pattern complexity: ${complexityResult.complexity} (${complexityResult.metavarCount} metavariables, score: ${complexityResult.score.toFixed(1)}). ` +
+        `very complex patterns are difficult to maintain. Strongly consider using composite rules with 'all' or 'any'. ` +
+        `See: https://ast-grep.github.io/reference/rule.html#all`
       );
     }
     
@@ -251,6 +522,61 @@ export class YamlValidator {
     }
     
     return { valid: true, errors: [] };
+  }
+}
+
+/**
+ * Path normalization and validation utilities for cross-platform path handling.
+ * 
+ * Provides utilities for normalizing Windows paths to forward-slash format
+ * (ast-grep preferred format), detecting Windows absolute paths, and handling
+ * paths with spaces that require quoting for shell execution.
+ * 
+ * Key Features:
+ * - Windows backslash to forward-slash conversion
+ * - Windows absolute path detection (drive letters)
+ * - UNC path support
+ * - Safe POSIX handling (preserves backslashes in filenames on Unix)
+ */
+export class PathValidator {
+  /**
+   * Normalize path separators to forward slashes for ast-grep compatibility.
+   * Converts Windows backslashes to forward slashes while preserving path structure.
+   * Only normalizes when running on Windows or detecting Windows-specific path patterns
+   * to avoid breaking POSIX systems where backslashes are valid filename characters.
+   * 
+   * Handles:
+   * - Windows absolute paths: C:\Users -> C:/Users
+   * - UNC paths: \\server\share -> //server/share
+   * - Mixed separators: C:\Users/project -> C:/Users/project
+   * - Unix paths: /home/user -> /home/user (unchanged)
+   * - Relative paths: ./src, ../lib -> separators normalized only when on Windows
+   */
+  static normalizePath(inputPath: string): string {
+    if (!inputPath || inputPath === '' || inputPath === '.') {
+      return inputPath;
+    }
+
+    // Only normalize if running on Windows or path contains Windows-specific patterns
+    const isWindowsPlatform = process.platform === 'win32';
+    const hasWindowsAbsolutePath = this.isWindowsAbsolutePath(inputPath);
+    const hasUncPath = /^\\\\/.test(inputPath);
+
+    if (isWindowsPlatform || hasWindowsAbsolutePath || hasUncPath) {
+      // Replace all backslashes with forward slashes
+      return inputPath.replace(/\\/g, '/');
+    }
+
+    // On POSIX systems with no Windows patterns, return unchanged
+    return inputPath;
+  }
+
+  /**
+   * Detect if a path is a Windows absolute path with drive letter.
+   * Matches patterns like C:/, D:\, etc.
+   */
+  static isWindowsAbsolutePath(inputPath: string): boolean {
+    return /^[a-zA-Z]:[/\\]/.test(inputPath);
   }
 }
 
