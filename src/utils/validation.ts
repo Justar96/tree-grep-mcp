@@ -542,33 +542,23 @@ export class PathValidator {
   /**
    * Normalize path separators to forward slashes for ast-grep compatibility.
    * Converts Windows backslashes to forward slashes while preserving path structure.
-   * Only normalizes when running on Windows or detecting Windows-specific path patterns
-   * to avoid breaking POSIX systems where backslashes are valid filename characters.
-   * 
+   * Normalizes all backslashes since ast-grep expects forward slashes on all platforms.
+   *
    * Handles:
    * - Windows absolute paths: C:\Users -> C:/Users
    * - UNC paths: \\server\share -> //server/share
    * - Mixed separators: C:\Users/project -> C:/Users/project
    * - Unix paths: /home/user -> /home/user (unchanged)
-   * - Relative paths: ./src, ../lib -> separators normalized only when on Windows
+   * - Relative paths with backslashes: src\fixtures -> src/fixtures
    */
   static normalizePath(inputPath: string): string {
     if (!inputPath || inputPath === '' || inputPath === '.') {
       return inputPath;
     }
 
-    // Only normalize if running on Windows or path contains Windows-specific patterns
-    const isWindowsPlatform = process.platform === 'win32';
-    const hasWindowsAbsolutePath = this.isWindowsAbsolutePath(inputPath);
-    const hasUncPath = /^\\\\/.test(inputPath);
-
-    if (isWindowsPlatform || hasWindowsAbsolutePath || hasUncPath) {
-      // Replace all backslashes with forward slashes
-      return inputPath.replace(/\\/g, '/');
-    }
-
-    // On POSIX systems with no Windows patterns, return unchanged
-    return inputPath;
+    // Always normalize backslashes to forward slashes for ast-grep compatibility
+    // ast-grep expects forward slashes on all platforms
+    return inputPath.replace(/\\/g, '/');
   }
 
   /**

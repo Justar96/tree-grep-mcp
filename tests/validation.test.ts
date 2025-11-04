@@ -923,16 +923,11 @@ describe('PathValidator', () => {
       expect(result).toBe('/home/user/project');
     });
 
-    test('normalizes relative paths with backslashes on Windows', () => {
+    test('normalizes relative paths with backslashes on all platforms', () => {
       const { PathValidator } = require('../src/utils/validation.js');
       const result = PathValidator.normalizePath('src\\components\\Button.tsx');
-      // On Windows platform or when Windows patterns detected, backslashes are normalized
-      if (process.platform === 'win32') {
-        expect(result).toBe('src/components/Button.tsx');
-      } else {
-        // On Unix, no Windows-specific patterns, so unchanged
-        expect(result).toBe('src\\components\\Button.tsx');
-      }
+      // Backslashes are always normalized to forward slashes for ast-grep compatibility
+      expect(result).toBe('src/components/Button.tsx');
     });
 
     test('preserves relative paths with forward slashes', () => {
@@ -970,13 +965,13 @@ describe('PathValidator', () => {
       expect(result).toBe('C:/Program Files/MyApp');
     });
 
-    test('platform-specific behavior: normalizes only on Windows or with Windows patterns', () => {
+    test('platform-specific behavior: normalizes backslashes on all platforms', () => {
       const { PathValidator } = require('../src/utils/validation.js');
       // Windows absolute path should be normalized regardless of platform
       const windowsPath = PathValidator.normalizePath('D:\\code\\app');
       expect(windowsPath).toBe('D:/code/app');
 
-      // Unix path should not be modified
+      // Unix path without backslashes should not be modified
       const unixPath = PathValidator.normalizePath('/usr/local/bin');
       expect(unixPath).toBe('/usr/local/bin');
     });
