@@ -11,6 +11,12 @@ const execFileAsync = promisify(execFile);
  * Manages ast-grep binary discovery, installation, validation, and execution.
  */
 export class AstGrepBinaryManager {
+  private static readonly HARDCODED_VERSION = '0.39.5';
+  private static readonly GITHUB_RELEASES_API = 'https://api.github.com/repos/ast-grep/ast-grep/releases/latest';
+  private static readonly CACHE_VALIDATION_RETRIES = 3;
+  private static readonly CACHE_VALIDATION_RETRY_DELAY_MS = 1000;
+  private static readonly VERSION_FETCH_TIMEOUT_MS = 5000;
+
   private binaryPath: string | null = null;
   private isInitialized = false;
   private options: InstallationOptions;
@@ -20,6 +26,67 @@ export class AstGrepBinaryManager {
    */
   constructor(options: InstallationOptions = {}) {
     this.options = options;
+  }
+
+  private async extractBinaryVersion(binaryPath: string): Promise<string | null> {
+    try {
+      const { command, commandArgs } = this.getExecutionCommand(binaryPath, ['--version']);
+      const { stdout, stderr } = await execFileAsync(command, commandArgs, { timeout: 5000 });
+      const output = `${stdout ?? ''}${stderr ?? ''}`;
+      const match = output.match(/\d+\.\d+\.\d+/);
+      return match ? match[0] : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private compareVersions(first: string, second: string): number {
+    const parse = (value: string): number[] => value
+      .split('.')
+      .map((segment) => Number.parseInt(segment, 10))
+      .map((num) => Number.isNaN(num) ? 0 : num);
+
+    const firstParts = parse(first);
+    const secondParts = parse(second);
+    const length = Math.max(firstParts.length, secondParts.length);
+
+    for (let index = 0; index < length; index++) {
+      const a = firstParts[index] ?? 0;
+      const b = secondParts[index] ?? 0;
+      if (a > b) return 1;
+      if (a < b) return -1;
+    }
+
+    return 0;
+  }
+
+  private async fetchLatestGitHubVersion(): Promise<string | null> {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), AstGrepBinaryManager.VERSION_FETCH_TIMEOUT_MS);
+
+    try {
+      const response = await fetch(AstGrepBinaryManager.GITHUB_RELEASES_API, {
+        signal: controller.signal,
+        headers: { 'Accept': 'application/vnd.github+json' }
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const body = await response.json() as { tag_name?: string };
+      const tagName = typeof body?.tag_name === 'string' ? body.tag_name : null;
+      if (!tagName) {
+        return null;
+      }
+
+      return tagName.startsWith('v') ? tagName.slice(1) : tagName;
+    } catch {
+      console.error('Warning: Could not fetch latest version from GitHub, using hardcoded version 0.39.5');
+      return null;
+    } finally {
+      clearTimeout(timeoutId);
+    }
   }
 
   /**
@@ -58,6 +125,8 @@ export class AstGrepBinaryManager {
     if (await this.testBinary(customPath)) {
       this.binaryPath = customPath;
       this.isInitialized = true;
+      const version = await this.extractBinaryVersion(customPath);
+      console.error(`Using custom binary: ${customPath} (version: ${version ?? 'unknown'})`);
     } else {
       throw new BinaryError(`Custom binary path "${customPath}" is not valid`);
     }
@@ -71,9 +140,11 @@ export class AstGrepBinaryManager {
     if (systemPath && await this.testBinary(systemPath)) {
       this.binaryPath = systemPath;
       this.isInitialized = true;
+      const version = await this.extractBinaryVersion(systemPath);
+      console.error(`Using system binary: ${systemPath} (version: ${version ?? 'unknown'})`);
     } else {
       throw new BinaryError(
-        'ast-grep binary not found in PATH. Please install ast-grep or use --auto-install option.'
+        'ast-grep not found in PATH. Install from official sources (see https://ast-grep.github.io/guide/quick-start.html) or use --auto-install.'
       );
     }
   }
@@ -85,6 +156,7 @@ export class AstGrepBinaryManager {
     const platform = this.options.platform === 'auto' ?
       process.platform : this.options.platform || process.platform;
     const arch = process.arch;
+    const totalStages = 4;
 
     // Validate platform/architecture support
     const supportedPlatforms = ['win32', 'darwin', 'linux'];
@@ -108,30 +180,52 @@ export class AstGrepBinaryManager {
     const binaryName = this.getBinaryName(platform, arch);
     const binaryPath = path.join(cacheDir, binaryName);
 
+    this.logStage(1, totalStages, `Checking cached binary at ${binaryPath}...`);
+
     // Check if binary exists in cache and is valid
     if (await this.fileExists(binaryPath)) {
-      if (await this.testBinary(binaryPath)) {
-        console.error(`Using cached binary: ${binaryPath}`);
+      const expectedVersionForCache = await this.fetchLatestGitHubVersion() ?? AstGrepBinaryManager.HARDCODED_VERSION;
+      let cacheValidated = false;
+
+      for (let attempt = 1; attempt <= AstGrepBinaryManager.CACHE_VALIDATION_RETRIES; attempt++) {
+        if (await this.testBinary(binaryPath, expectedVersionForCache)) {
+          cacheValidated = true;
+          break;
+        }
+
+        if (attempt < AstGrepBinaryManager.CACHE_VALIDATION_RETRIES) {
+          const delay = AstGrepBinaryManager.CACHE_VALIDATION_RETRY_DELAY_MS * Math.pow(2, attempt - 1);
+          console.error(`Cache validation attempt ${attempt}/${AstGrepBinaryManager.CACHE_VALIDATION_RETRIES} failed, retrying in ${delay}ms...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+      }
+
+      if (cacheValidated) {
+        const version = await this.extractBinaryVersion(binaryPath);
+        console.error(`Using cached binary: ${binaryPath} (version: ${version ?? 'unknown'})`);
         this.binaryPath = binaryPath;
         this.isInitialized = true;
+        this.logStage(4, totalStages, 'Installation complete');
         return;
-      } else {
-        // Remove invalid cached binary
-        try {
-          await fs.unlink(binaryPath);
-        } catch {
-          // Ignore cleanup errors
-        }
+      }
+
+      console.error(`Cache validation failed after ${AstGrepBinaryManager.CACHE_VALIDATION_RETRIES} attempts, re-downloading binary`);
+      try {
+        await fs.unlink(binaryPath);
+      } catch {
+        // Ignore cleanup errors
       }
     }
 
     // Try to download binary
     try {
-      console.error(`Installing ast-grep binary for ${platform}-${arch}...`);
-      await this.downloadBinary(platform, arch, binaryPath);
+      this.logStage(2, totalStages, `Downloading ast-grep binary for ${platform}-${arch}...`);
+      const version = await this.downloadBinary(platform, arch, binaryPath);
+      this.logStage(3, totalStages, 'Validating downloaded binary version...');
+      console.error(`Using downloaded binary: ${binaryPath} (version: ${version ?? 'unknown'})`);
       this.binaryPath = binaryPath;
       this.isInitialized = true;
-      console.error(`Successfully installed binary at ${binaryPath}`);
+      this.logStage(4, totalStages, 'Installation complete');
     } catch (error) {
       console.error(`Failed to download binary: ${error instanceof Error ? error.message : String(error)}`);
       console.error('Falling back to system binary...');
@@ -141,14 +235,18 @@ export class AstGrepBinaryManager {
         await this.useSystemBinary();
       } catch (systemError) {
         throw new BinaryError(
-          `Failed to install ast-grep binary and no system binary found.\n` +
-          `Download error: ${error instanceof Error ? error.message : String(error)}\n` +
-          `System binary error: ${systemError instanceof Error ? systemError.message : String(systemError)}\n\n` +
-          `Solutions:\n` +
-          `1. Install ast-grep manually: https://github.com/ast-grep/ast-grep#installation\n` +
-          `2. Use --use-system option if ast-grep is available\n` +
-          `3. Set AST_GREP_BINARY_PATH environment variable\n` +
-          `4. Check network connectivity for automatic download`
+          'Failed to install ast-grep binary automatically.\n\n' +
+          'RECOMMENDED: Install ast-grep from official sources for best compatibility:\n' +
+          '  • npm: npm install -g @ast-grep/cli\n' +
+          '  • cargo: cargo install ast-grep\n' +
+          '  • brew: brew install ast-grep\n' +
+          '  • pip: pip install ast-grep-cli\n' +
+          '  • Official guide: https://ast-grep.github.io/guide/quick-start.html\n\n' +
+          'ALTERNATIVE OPTIONS:\n' +
+          '  • Use --use-system if ast-grep is already installed\n' +
+          '  • Set AST_GREP_BINARY_PATH environment variable\n' +
+          '  • Check network connectivity for automatic download\n\n' +
+          `Error details:\n  Download error: ${error instanceof Error ? error.message : String(error)}\n  System binary error: ${systemError instanceof Error ? systemError.message : String(systemError)}`
         );
       }
     }
@@ -177,22 +275,31 @@ export class AstGrepBinaryManager {
   /**
    * Run --version against the provided binary to confirm it is usable.
    */
-  private async testBinary(binaryPath: string): Promise<boolean> {
+  private async testBinary(binaryPath: string, expectedVersion?: string): Promise<boolean> {
     try {
-      if (binaryPath.endsWith('.ps1')) {
-        // For PowerShell scripts, use powershell.exe to execute
-        await execFileAsync('powershell.exe', ['-File', binaryPath, '--version'], { timeout: 5000 });
-      } else if (binaryPath.endsWith('.cmd')) {
-        // For batch files, use cmd.exe to execute
-        await execFileAsync('cmd.exe', ['/c', binaryPath, '--version'], { timeout: 5000 });
-      } else {
-        // For executables, run directly
-        await execFileAsync(binaryPath, ['--version'], { timeout: 5000 });
-      }
-      return true;
+      const { command, commandArgs } = this.getExecutionCommand(binaryPath, ['--version']);
+      await execFileAsync(command, commandArgs, { timeout: 5000 });
     } catch {
       return false;
     }
+
+    if (!expectedVersion) {
+      return true;
+    }
+
+    const actualVersion = await this.extractBinaryVersion(binaryPath);
+    if (!actualVersion) {
+      console.error(`Binary version mismatch: found unknown, expected ${expectedVersion}`);
+      return false;
+    }
+
+    const comparison = this.compareVersions(actualVersion, expectedVersion);
+    if (comparison < 0) {
+      console.error(`Binary version mismatch: found ${actualVersion}, expected ${expectedVersion}`);
+      return false;
+    }
+
+    return true;
   }
 
   /**
@@ -218,9 +325,9 @@ export class AstGrepBinaryManager {
   /**
    * Download, extract, and validate a platform specific ast-grep binary.
    */
-  private async downloadBinary(platform: string, arch: string, targetPath: string): Promise<void> {
-    const version = '0.39.5'; // Latest version
-    const baseUrl = `https://github.com/ast-grep/ast-grep/releases/download/${version}`;
+  private async downloadBinary(platform: string, arch: string, targetPath: string): Promise<string> {
+    const releaseVersion = await this.fetchLatestGitHubVersion() ?? AstGrepBinaryManager.HARDCODED_VERSION;
+    const baseUrl = `https://github.com/ast-grep/ast-grep/releases/download/${releaseVersion}`;
 
     const fileMap: Record<string, string> = {
       'win32-x64': 'app-x86_64-pc-windows-msvc.zip',
@@ -242,26 +349,38 @@ export class AstGrepBinaryManager {
     // Ensure cache directory exists
     await fs.mkdir(path.dirname(targetPath), { recursive: true });
 
-    console.error(`Downloading ast-grep binary for ${platform}-${arch}...`);
+    console.error(`Downloading from: ${downloadUrl}`);
 
     try {
       // Download with retry logic
       await this.downloadWithRetry(downloadUrl, tempZipPath, 3);
 
+      console.error('Extracting binary from archive...');
       // Extract binary from zip
       await this.extractBinary(tempZipPath, targetPath, platform);
+
+      console.error('Validating binary version...');
+      if (!await this.testBinary(targetPath, releaseVersion)) {
+        const actualVersion = await this.extractBinaryVersion(targetPath);
+        throw new BinaryError(`Downloaded binary version mismatch. Expected v${releaseVersion}, found ${actualVersion ?? 'unknown'}. This may indicate a corrupted download.`);
+      }
+
+      const validatedVersion = await this.extractBinaryVersion(targetPath) ?? releaseVersion;
+      console.error(`Binary version validated: v${validatedVersion}`);
+      console.error(`Successfully installed ast-grep v${validatedVersion}`);
 
       // Set executable permissions on Unix systems
       if (platform !== 'win32') {
         await fs.chmod(targetPath, '755');
       }
 
-      // Test the downloaded binary
-      if (!await this.testBinary(targetPath)) {
-        throw new BinaryError('Downloaded binary failed validation test');
+      try {
+        await fs.unlink(tempZipPath);
+      } catch {
+        // Ignore cleanup errors
       }
 
-      console.error(`Binary installed successfully at ${targetPath}`);
+      return validatedVersion;
 
     } catch (error) {
       // Cleanup on failure
@@ -272,11 +391,18 @@ export class AstGrepBinaryManager {
       }
       
       throw new BinaryError(
-        `Failed to download ast-grep binary: ${error instanceof Error ? error.message : String(error)}\n` +
-        `Fallback options:\n` +
-        `1. Install ast-grep manually: https://github.com/ast-grep/ast-grep\n` +
-        `2. Use --use-system option if ast-grep is in PATH\n` +
-        `3. Set AST_GREP_BINARY_PATH environment variable`
+        `Failed to download ast-grep binary: ${error instanceof Error ? error.message : String(error)}\n\n` +
+        'RECOMMENDED: Install ast-grep from official sources for best compatibility:\n' +
+        '  • npm: npm install -g @ast-grep/cli\n' +
+        '  • cargo: cargo install ast-grep\n' +
+        '  • brew: brew install ast-grep\n' +
+        '  • pip: pip install ast-grep-cli\n' +
+        '  • Official guide: https://ast-grep.github.io/guide/quick-start.html\n\n' +
+        'ALTERNATIVE OPTIONS:\n' +
+        '  • Use --use-system if ast-grep is already installed\n' +
+        '  • Set AST_GREP_BINARY_PATH environment variable\n' +
+        '  • Check network connectivity for automatic download\n\n' +
+        'Official installation methods ensure version compatibility and receive automatic updates.'
       );
     }
   }
@@ -353,6 +479,10 @@ export class AstGrepBinaryManager {
       await writer.close();
       await fileStream.close();
     }
+  }
+
+  private logStage(stage: number, totalStages: number, message: string): void {
+    console.error(`[Stage ${stage}/${totalStages}] ${message}`);
   }
 
   /**
