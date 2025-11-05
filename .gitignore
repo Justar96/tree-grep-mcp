@@ -81,3 +81,11 @@ test-results/
 test-output/
 cli-test-output/
 .claude/
+
+# Development documentation (AI-specific)
+AGENTS.md
+CLAUDE.md
+AST_GREP_ALL_DOCUMENTS.md
+
+# Manual test files
+test-manual/

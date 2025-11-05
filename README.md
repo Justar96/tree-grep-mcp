@@ -2,6 +2,8 @@
 
 A Model Context Protocol server that provides structural code search and transformation using ast-grep. Direct wrapper with zero abstractions for maximum performance and perfect CLI compatibility.
 
+> Official ast-grep documentation: https://github.com/ast-grep/ast-grep , https://ast-grep.github.io/
+
 ## Installation
 
 Add to your MCP settings configuration:
@@ -218,4 +220,4 @@ MIT License
 
 - GitHub: https://github.com/justar96/tree-grep-mcp
 - npm: https://www.npmjs.com/package/@cabbages/tree-grep
-- ast-grep: https://ast-grep.github.io/
+- ast-grep: https://github.com/ast-grep/ast-grep
