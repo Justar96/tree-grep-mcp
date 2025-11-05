@@ -1,4 +1,5 @@
 // Sample TypeScript file for integration tests
+/* eslint-disable @typescript-eslint/no-unused-vars */
 
 interface User {
   name: string;
@@ -17,11 +18,11 @@ class UserManager {
   }
 }
 
-class AdminManager extends UserManager {
+class _AdminManager extends UserManager {
   role: string = "admin";
 }
 
-var userName = "Alice";
-var userAge = 30;
-const isActive = true;
-var userEmail = "alice@example.com";
+var _userName = "Alice";
+var _userAge = 30;
+const _isActive = true;
+var _userEmail = "alice@example.com";

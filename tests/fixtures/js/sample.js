@@ -2,7 +2,7 @@
 
 function processData(data) {
   console.log("Processing data:", data);
-  const result = data.map(x => x * 2);
+  const result = data.map((x) => x * 2);
   console.log("Result:", result);
   return result;
 }

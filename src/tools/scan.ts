@@ -1,12 +1,68 @@
-import * as fs from 'fs/promises';
-import * as path from 'path';
-import * as os from 'os';
-import { AstGrepBinaryManager } from '../core/binary-manager.js';
-import { WorkspaceManager } from '../core/workspace-manager.js';
-import { ValidationError, ExecutionError } from '../types/errors.js';
-import { PatternValidator, YamlValidator, ParameterValidator, PathValidator } from '../utils/validation.js';
-import type { Rule, Pattern } from '../types/rules.js';
-import { hasPositiveKey } from '../types/rules.js';
+import * as fs from "fs/promises";
+import * as path from "path";
+import * as os from "os";
+import { AstGrepBinaryManager } from "../core/binary-manager.js";
+import { WorkspaceManager } from "../core/workspace-manager.js";
+import { ValidationError } from "../types/errors.js";
+import {
+  PatternValidator,
+  YamlValidator,
+  ParameterValidator,
+  PathValidator,
+} from "../utils/validation.js";
+import type { Rule } from "../types/rules.js";
+import { hasPositiveKey } from "../types/rules.js";
+
+interface WhereConstraint {
+  metavariable: string;
+  regex?: string;
+  equals?: string;
+}
+
+interface ScanParams {
+  id: string;
+  language: string;
+  pattern?: string;
+  rule?: Record<string, unknown>;
+  where?: WhereConstraint[];
+  fix?: string;
+  message?: string;
+  severity?: "error" | "warning" | "info";
+  paths?: string[];
+  code?: string;
+  timeoutMs?: number;
+}
+
+interface FindingLocation {
+  file: string;
+  start: { line: number; column: number };
+  end: { line: number; column: number };
+}
+
+interface Finding {
+  file: string;
+  range: FindingLocation;
+  line: number;
+  column: number;
+  message?: string;
+  severity?: string;
+  ruleId?: string;
+  fix?: string;
+}
+
+interface ScanResult {
+  yaml: string;
+  skippedLines: number;
+  scan: {
+    findings: Finding[];
+    summary: {
+      totalFindings: number;
+      errors: number;
+      warnings: number;
+      skippedLines: number;
+    };
+  };
+}
 
 /**
  * Rule builder that generates YAML and runs ast-grep scan
@@ -17,52 +73,53 @@ export class ScanTool {
     private binaryManager: AstGrepBinaryManager
   ) {}
 
-  async execute(params: any): Promise<any> {
+  async execute(paramsRaw: Record<string, unknown>): Promise<ScanResult> {
+    // Runtime parameter validation with type narrowing
+    const params = paramsRaw as unknown as ScanParams;
+
     // Validate required parameters
-    if (!params.id || typeof params.id !== 'string') {
-      throw new ValidationError('id is required and must be a string');
+    if (!params.id || typeof params.id !== "string") {
+      throw new ValidationError("id is required and must be a string");
     }
-    if (!params.language || typeof params.language !== 'string') {
-      throw new ValidationError('language is required and must be a string');
+    if (!params.language || typeof params.language !== "string") {
+      throw new ValidationError("language is required and must be a string");
     }
 
     // Support two modes:
     // Mode 1 (existing): Simple pattern string + optional where constraints
     // Mode 2 (new): Complex rule object with kind, has, inside, all, any, not, matches, etc.
-    const hasPattern = params.pattern && typeof params.pattern === 'string';
-    const hasRule = params.rule && typeof params.rule === 'object' && !Array.isArray(params.rule);
+    const hasPattern = params.pattern && typeof params.pattern === "string";
+    const hasRule = params.rule && typeof params.rule === "object" && !Array.isArray(params.rule);
 
     if (!hasPattern && !hasRule) {
       throw new ValidationError(
-        'Either pattern (string) or rule (object) is required. ' +
-        'Use pattern for simple matching, or rule for structural rules with kind, has, inside, etc.'
+        "Either pattern (string) or rule (object) is required. " +
+          "Use pattern for simple matching, or rule for structural rules with kind, has, inside, etc."
       );
     }
 
     if (hasPattern && hasRule) {
       throw new ValidationError(
-        'Cannot specify both pattern and rule parameters. ' +
-        'Use pattern for simple matching, or rule for structural rules.'
+        "Cannot specify both pattern and rule parameters. " +
+          "Use pattern for simple matching, or rule for structural rules."
       );
     }
 
     // Validate rule ID format
     const ruleIdValidation = YamlValidator.validateRuleId(params.id);
     if (!ruleIdValidation.valid) {
-      throw new ValidationError(
-        `Invalid rule ID: ${ruleIdValidation.errors.join('; ')}`,
-        { errors: ruleIdValidation.errors }
-      );
+      throw new ValidationError(`Invalid rule ID: ${ruleIdValidation.errors.join("; ")}`, {
+        errors: ruleIdValidation.errors,
+      });
     }
 
     // Validate pattern (only in simple pattern mode)
-    if (hasPattern) {
+    if (hasPattern && params.pattern) {
       const patternValidation = PatternValidator.validatePattern(params.pattern, params.language);
       if (!patternValidation.valid) {
-        throw new ValidationError(
-          `Invalid pattern: ${patternValidation.errors.join('; ')}`,
-          { errors: patternValidation.errors }
-        );
+        throw new ValidationError(`Invalid pattern: ${patternValidation.errors.join("; ")}`, {
+          errors: patternValidation.errors,
+        });
       }
 
       // Log pattern warnings if any - log each warning individually for better test assertions
@@ -74,22 +131,22 @@ export class ScanTool {
     }
 
     // Validate rule object (in structural rule mode)
-    if (hasRule) {
+    if (hasRule && params.rule) {
       // Basic validation: rule must have at least one positive key
-      if (!hasPositiveKey(params.rule)) {
+      if (!hasPositiveKey(params.rule as Rule)) {
         throw new ValidationError(
-          'Rule object must have at least one positive key (pattern, kind, regex, inside, has, precedes, follows, all, any, or matches)'
+          "Rule object must have at least one positive key (pattern, kind, regex, inside, has, precedes, follows, all, any, or matches)"
         );
       }
 
       // If rule has a pattern property, validate it
       if (params.rule.pattern) {
-        const pattern = params.rule.pattern;
-        if (typeof pattern === 'string') {
+        const pattern = params.rule.pattern as string | Record<string, unknown>;
+        if (typeof pattern === "string") {
           const patternValidation = PatternValidator.validatePattern(pattern, params.language);
           if (!patternValidation.valid) {
             throw new ValidationError(
-              `Invalid pattern in rule: ${patternValidation.errors.join('; ')}`,
+              `Invalid pattern in rule: ${patternValidation.errors.join("; ")}`,
               { errors: patternValidation.errors }
             );
           }
@@ -99,35 +156,39 @@ export class ScanTool {
               console.error(`Warning: ${warning}`);
             }
           }
-        } else if (typeof pattern === 'object' && pattern !== null) {
+        } else if (typeof pattern === "object" && pattern !== null) {
           // Pattern object validation (selector, context, strictness)
-          if (pattern.selector && typeof pattern.selector !== 'string') {
-            throw new ValidationError('Pattern object selector must be a string');
+          const patternObj = pattern as Record<string, unknown>;
+          if (patternObj.selector && typeof patternObj.selector !== "string") {
+            throw new ValidationError("Pattern object selector must be a string");
           }
-          if (pattern.context && typeof pattern.context !== 'string') {
-            throw new ValidationError('Pattern object context must be a string');
+          if (patternObj.context && typeof patternObj.context !== "string") {
+            throw new ValidationError("Pattern object context must be a string");
           }
-          if (pattern.strictness) {
-            const validStrictness = ['cst', 'smart', 'ast', 'relaxed', 'signature'];
-            if (!validStrictness.includes(pattern.strictness)) {
+          if (patternObj.strictness) {
+            const validStrictness = ["cst", "smart", "ast", "relaxed", "signature"];
+            if (
+              typeof patternObj.strictness === "string" &&
+              !validStrictness.includes(patternObj.strictness)
+            ) {
               throw new ValidationError(
-                `Invalid strictness: ${pattern.strictness}. Must be one of: ${validStrictness.join(', ')}`
+                `Invalid strictness: ${patternObj.strictness}. Must be one of: ${validStrictness.join(", ")}`
               );
             }
           }
         } else {
-          throw new ValidationError('Rule pattern must be a string or pattern object');
+          throw new ValidationError("Rule pattern must be a string or pattern object");
         }
       }
 
       // Validate kind if present
-      if (params.rule.kind && typeof params.rule.kind !== 'string') {
-        throw new ValidationError('Rule kind must be a string (tree-sitter node type)');
+      if (params.rule.kind && typeof params.rule.kind !== "string") {
+        throw new ValidationError("Rule kind must be a string (tree-sitter node type)");
       }
 
       // Validate regex if present
-      if (params.rule.regex && typeof params.rule.regex !== 'string') {
-        throw new ValidationError('Rule regex must be a string');
+      if (params.rule.regex && typeof params.rule.regex !== "string") {
+        throw new ValidationError("Rule regex must be a string");
       }
     }
 
@@ -135,41 +196,45 @@ export class ScanTool {
     if (params.severity) {
       const severityValidation = YamlValidator.validateSeverity(params.severity);
       if (!severityValidation.valid) {
-        throw new ValidationError(severityValidation.errors.join('; '));
+        throw new ValidationError(severityValidation.errors.join("; "));
       }
     }
 
     // Validate optional parameters with actionable error messages
     const timeoutValidation = ParameterValidator.validateTimeout(params.timeoutMs);
     if (!timeoutValidation.valid) {
-      throw new ValidationError(timeoutValidation.errors.join('; '), { errors: timeoutValidation.errors });
+      throw new ValidationError(timeoutValidation.errors.join("; "), {
+        errors: timeoutValidation.errors,
+      });
     }
 
     const codeValidation = ParameterValidator.validateCode(params.code);
     if (!codeValidation.valid) {
-      throw new ValidationError(codeValidation.errors.join('; '), { errors: codeValidation.errors });
+      throw new ValidationError(codeValidation.errors.join("; "), {
+        errors: codeValidation.errors,
+      });
     }
 
     const normalizeLang = (lang: string) => {
       const map: Record<string, string> = {
-        javascript: 'js',
-        typescript: 'ts',
-        jsx: 'jsx',
-        tsx: 'tsx',
-        python: 'py',
-        py: 'py',
-        rust: 'rs',
-        rs: 'rs',
-        golang: 'go',
-        go: 'go',
-        java: 'java',
-        'c++': 'cpp',
-        cpp: 'cpp',
-        c: 'c',
-        kotlin: 'kt',
-        kt: 'kt',
+        javascript: "js",
+        typescript: "ts",
+        jsx: "jsx",
+        tsx: "tsx",
+        python: "py",
+        py: "py",
+        rust: "rs",
+        rs: "rs",
+        golang: "go",
+        go: "go",
+        java: "java",
+        "c++": "cpp",
+        cpp: "cpp",
+        c: "c",
+        kotlin: "kt",
+        kt: "kt",
       };
-      const lower = (lang || '').toLowerCase();
+      const lower = (lang || "").toLowerCase();
       return map[lower] || lang;
     };
 
@@ -183,37 +248,71 @@ export class ScanTool {
 
     let tempCodeFileForCleanup: string | null = null;
     try {
-      await fs.writeFile(rulesFile, yaml, 'utf8');
+      await fs.writeFile(rulesFile, yaml, "utf8");
 
       // Build scan command (normalize rule file path for ast-grep)
-      const args = ['scan', '--rule', PathValidator.normalizePath(rulesFile), '--json=stream'];
+      const args = ["scan", "--rule", PathValidator.normalizePath(rulesFile), "--json=stream"];
 
       // Add paths or inline code via temp file
       let tempCodeFile: string | null = null;
       if (params.code) {
         const extMap: Record<string, string> = {
-          js: 'js', ts: 'ts', jsx: 'jsx', tsx: 'tsx',
-          py: 'py', rs: 'rs', go: 'go', java: 'java',
-          cpp: 'cpp', c: 'c', kt: 'kt'
+          js: "js",
+          ts: "ts",
+          jsx: "jsx",
+          tsx: "tsx",
+          py: "py",
+          rs: "rs",
+          go: "go",
+          java: "java",
+          cpp: "cpp",
+          c: "c",
+          kt: "kt",
         };
-        const ext = extMap[normalizeLang(params.language)] || 'js';
+        const ext = extMap[normalizeLang(params.language)] || "js";
         const randomSuffix = Math.random().toString(36).substring(2, 15);
-        tempCodeFile = path.join(os.tmpdir(), `astgrep-inline-${Date.now()}-${randomSuffix}.${ext}`);
-        await fs.writeFile(tempCodeFile, params.code, 'utf8');
+        tempCodeFile = path.join(
+          os.tmpdir(),
+          `astgrep-inline-${Date.now()}-${randomSuffix}.${ext}`
+        );
+        await fs.writeFile(tempCodeFile, params.code, "utf8");
         args.push(PathValidator.normalizePath(tempCodeFile));
         tempCodeFileForCleanup = tempCodeFile;
       } else {
-        const inputPaths: string[] = params.paths && Array.isArray(params.paths) && params.paths.length > 0 ? params.paths : ['.'];
-        const { valid, resolvedPaths, errors } = this.workspaceManager.validatePaths(inputPaths);
+        const inputPaths: string[] =
+          params.paths && Array.isArray(params.paths) && params.paths.length > 0
+            ? params.paths
+            : ["."];
+
+        // Normalize paths for ast-grep compatibility (Windows -> forward slashes)
+        // Empty strings should be treated as current directory
+        const normalizedPaths = inputPaths.map((p) =>
+          p === "" ? "." : PathValidator.normalizePath(p)
+        );
+
+        // Validate paths for security (but don't use the absolute resolved paths)
+        const { valid, errors } = this.workspaceManager.validatePaths(normalizedPaths);
         if (!valid) {
-          throw new ValidationError('Invalid paths', { errors });
+          // Replace normalized paths in error messages with original paths
+          const originalErrors = errors.map((err) => {
+            let modifiedErr = err;
+            for (let i = 0; i < normalizedPaths.length; i++) {
+              if (normalizedPaths[i] !== inputPaths[i]) {
+                modifiedErr = modifiedErr.replace(normalizedPaths[i], inputPaths[i]);
+              }
+            }
+            return modifiedErr;
+          });
+          throw new ValidationError("Invalid paths", { errors: originalErrors });
         }
-        args.push(...resolvedPaths);
+
+        // Pass normalized paths to ast-grep (not absolute resolved paths)
+        args.push(...normalizedPaths);
       }
 
       const result = await this.binaryManager.executeAstGrep(args, {
         cwd: this.workspaceManager.getWorkspaceRoot(),
-        timeout: params.timeoutMs || 30000
+        timeout: params.timeoutMs || 30000,
       });
 
       const { findings, skippedLines } = this.parseFindings(result.stdout);
@@ -225,15 +324,14 @@ export class ScanTool {
           findings,
           summary: {
             totalFindings: findings.length,
-            errors: findings.filter(f => f.severity === 'error').length,
-            warnings: findings.filter(f => f.severity === 'warning').length,
-            skippedLines
-          }
-        }
+            errors: findings.filter((f) => f.severity === "error").length,
+            warnings: findings.filter((f) => f.severity === "warning").length,
+            skippedLines,
+          },
+        },
       };
 
       return resultObj;
-
     } finally {
       // Cleanup with logging
       const cleanupErrors: string[] = [];
@@ -241,30 +339,34 @@ export class ScanTool {
       try {
         await fs.unlink(rulesFile);
       } catch (e) {
-        cleanupErrors.push(`Failed to cleanup rule file: ${e instanceof Error ? e.message : String(e)}`);
+        cleanupErrors.push(
+          `Failed to cleanup rule file: ${e instanceof Error ? e.message : String(e)}`
+        );
       }
 
       if (tempCodeFileForCleanup) {
         try {
           await fs.unlink(tempCodeFileForCleanup);
         } catch (e) {
-          cleanupErrors.push(`Failed to cleanup temp code file: ${e instanceof Error ? e.message : String(e)}`);
+          cleanupErrors.push(
+            `Failed to cleanup temp code file: ${e instanceof Error ? e.message : String(e)}`
+          );
         }
       }
 
       if (cleanupErrors.length > 0) {
-        console.error('Cleanup warnings:', cleanupErrors.join('; '));
+        console.error("Cleanup warnings:", cleanupErrors.join("; "));
       }
     }
   }
 
-  private buildYaml(params: any): string {
+  private buildYaml(params: ScanParams): string {
     const lines = [
       `id: ${params.id}`,
       `message: ${YamlValidator.escapeYamlString(params.message || params.id)}`,
-      `severity: ${params.severity || 'warning'}`,
+      `severity: ${params.severity || "warning"}`,
       `language: ${params.language}`,
-      'rule:'
+      "rule:",
     ];
 
     // Mode 1: Simple pattern string
@@ -280,26 +382,32 @@ export class ScanTool {
 
       // Extract metavariables from rule for constraint/fix validation
       // This is a simplified extraction - only from top-level pattern
-      if (params.rule.pattern && typeof params.rule.pattern === 'string') {
+      if (params.rule.pattern && typeof params.rule.pattern === "string") {
         patternMetavars = PatternValidator.extractMetavariables(params.rule.pattern);
       }
     }
 
     // Add simple constraints if provided
     if (params.where && params.where.length > 0) {
-      lines.push('constraints:');
+      lines.push("constraints:");
       for (const constraint of params.where) {
         // Validate that metavariable exists in pattern
         if (!patternMetavars.has(constraint.metavariable)) {
           throw new ValidationError(
             `Constraint references metavariable '${constraint.metavariable}' which is not in the pattern. ` +
-            `Available metavariables: ${Array.from(patternMetavars).join(', ') || 'none'}`
+              `Available metavariables: ${Array.from(patternMetavars).join(", ") || "none"}`
           );
         }
 
         // Validate that constraint provides at least one operator (regex or equals)
-        const hasRegex = constraint.hasOwnProperty('regex') && typeof constraint.regex === 'string' && constraint.regex.trim().length > 0;
-        const hasEquals = constraint.hasOwnProperty('equals') && typeof constraint.equals === 'string' && constraint.equals.length > 0;
+        const hasRegex =
+          constraint.hasOwnProperty("regex") &&
+          typeof constraint.regex === "string" &&
+          constraint.regex.trim().length > 0;
+        const hasEquals =
+          constraint.hasOwnProperty("equals") &&
+          typeof constraint.equals === "string" &&
+          constraint.equals.length > 0;
 
         if (!hasRegex && !hasEquals) {
           throw new ValidationError(
@@ -308,11 +416,11 @@ export class ScanTool {
         }
 
         lines.push(`  ${constraint.metavariable}:`);
-        if (hasRegex) {
+        if (hasRegex && constraint.regex) {
           lines.push(`    regex: ${YamlValidator.escapeYamlString(constraint.regex)}`);
-        } else if (hasEquals) {
-          const escaped = constraint.equals.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-          lines.push(`    regex: ${YamlValidator.escapeYamlString('^' + escaped + '$')}`);
+        } else if (hasEquals && constraint.equals) {
+          const escaped = constraint.equals.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          lines.push(`    regex: ${YamlValidator.escapeYamlString("^" + escaped + "$")}`);
         }
       }
     }
@@ -325,7 +433,7 @@ export class ScanTool {
         if (!patternMetavars.has(metavar)) {
           throw new ValidationError(
             `Fix template uses metavariable '${metavar}' which is not in the pattern. ` +
-            `Available metavariables: ${Array.from(patternMetavars).join(', ') || 'none'}`
+              `Available metavariables: ${Array.from(patternMetavars).join(", ") || "none"}`
           );
         }
       }
@@ -333,7 +441,7 @@ export class ScanTool {
       lines.push(`fix: ${YamlValidator.escapeYamlString(params.fix)}`);
     }
 
-    return lines.join('\n');
+    return lines.join("\n");
   }
 
   /**
@@ -345,14 +453,14 @@ export class ScanTool {
    */
   private serializeRule(rule: Rule, indentLevel: number): string[] {
     const lines: string[] = [];
-    const indent = '  '.repeat(indentLevel);
+    const indent = "  ".repeat(indentLevel);
 
     // Atomic rules
     if (rule.pattern !== undefined) {
       const pattern = rule.pattern;
-      if (typeof pattern === 'string') {
+      if (typeof pattern === "string") {
         lines.push(`${indent}pattern: ${YamlValidator.escapeYamlString(pattern)}`);
-      } else if (typeof pattern === 'object' && pattern !== null) {
+      } else if (typeof pattern === "object" && pattern !== null) {
         // Pattern object with selector, context, strictness
         lines.push(`${indent}pattern:`);
         if (pattern.selector) {
@@ -376,11 +484,11 @@ export class ScanTool {
     }
 
     // Relational rules (inside, has, precedes, follows)
-    const relationalRules: Array<{ key: string; value: any }> = [
-      { key: 'inside', value: rule.inside },
-      { key: 'has', value: rule.has },
-      { key: 'precedes', value: rule.precedes },
-      { key: 'follows', value: rule.follows }
+    const relationalRules: Array<{ key: string; value: unknown }> = [
+      { key: "inside", value: rule.inside },
+      { key: "has", value: rule.has },
+      { key: "precedes", value: rule.precedes },
+      { key: "follows", value: rule.follows },
     ];
 
     for (const { key, value } of relationalRules) {
@@ -392,18 +500,19 @@ export class ScanTool {
         lines.push(...nestedLines);
 
         // Add stopBy and field if present in the relational rule
-        if (typeof value === 'object' && value !== null) {
-          if ((value as any).stopBy !== undefined) {
-            const stopBy = (value as any).stopBy;
-            if (typeof stopBy === 'string') {
+        if (typeof value === "object" && value !== null) {
+          const valueObj = value as Record<string, unknown>;
+          if (valueObj.stopBy !== undefined) {
+            const stopBy = valueObj.stopBy;
+            if (typeof stopBy === "string") {
               lines.push(`${indent}  stopBy: ${stopBy}`);
-            } else if (typeof stopBy === 'object') {
+            } else if (typeof stopBy === "object") {
               lines.push(`${indent}  stopBy:`);
               lines.push(...this.serializeRule(stopBy as Rule, indentLevel + 2));
             }
           }
-          if ((value as any).field !== undefined) {
-            lines.push(`${indent}  field: ${(value as any).field}`);
+          if (valueObj.field !== undefined) {
+            lines.push(`${indent}  field: ${String(valueObj.field)}`);
           }
         }
       }
@@ -450,34 +559,59 @@ export class ScanTool {
     return lines;
   }
 
-  private parseFindings(stdout: string): { findings: any[], skippedLines: number } {
-    const findings: any[] = [];
+  private parseFindings(stdout: string): { findings: Finding[]; skippedLines: number } {
+    const findings: Finding[] = [];
     let skippedLines = 0;
 
     if (!stdout.trim()) return { findings, skippedLines: 0 };
 
-    const lines = stdout.trim().split('\n');
+    const lines = stdout.trim().split("\n");
     for (const line of lines) {
       if (!line.trim()) continue;
       try {
-        const finding = JSON.parse(line);
+        const finding = JSON.parse(line) as {
+          ruleId?: string;
+          severity?: string;
+          message?: string;
+          file?: string;
+          range?: {
+            start?: { line?: number; column?: number };
+            end?: { line?: number; column?: number };
+          };
+          fix?: string;
+        };
+        const startLine = (finding.range?.start?.line || 0) + 1;
+        const startColumn = finding.range?.start?.column || 0;
         findings.push({
-          ruleId: finding.ruleId || 'unknown',
-          severity: finding.severity || 'info',
-          message: finding.message || '',
-          file: finding.file || '',
-          line: (finding.range?.start?.line || 0) + 1, // Convert to 1-based
-          column: finding.range?.start?.column || 0,
-          fix: finding.fix
+          ruleId: finding.ruleId || "unknown",
+          severity: finding.severity || "info",
+          message: finding.message || "",
+          file: finding.file || "",
+          line: startLine,
+          column: startColumn,
+          range: {
+            file: finding.file || "",
+            start: {
+              line: startLine,
+              column: startColumn,
+            },
+            end: {
+              line: (finding.range?.end?.line || 0) + 1,
+              column: finding.range?.end?.column || 0,
+            },
+          },
+          fix: finding.fix,
         });
-      } catch (e) {
+      } catch {
         skippedLines++;
         console.error(`Warning: Skipped malformed JSON line: ${line.substring(0, 100)}...`);
       }
     }
 
     if (skippedLines > 0) {
-      console.error(`Warning: Skipped ${skippedLines} malformed finding lines out of ${lines.length} total lines`);
+      console.error(
+        `Warning: Skipped ${skippedLines} malformed finding lines out of ${lines.length} total lines`
+      );
     }
 
     return { findings, skippedLines };
@@ -485,7 +619,7 @@ export class ScanTool {
 
   static getSchema() {
     return {
-      name: 'ast_run_rule',
+      name: "ast_run_rule",
       description: `Generate and execute ast-grep YAML rules. Supports simple patterns with constraints, structural rules (kind/has/inside/all/any/not), fix suggestions, and severity levels. Returns generated YAML and scan findings.
 
 QUICK START:
@@ -659,76 +793,83 @@ Example: { id: "no-var", pattern: "var $N = $V", language: "js", paths: ["src/"]
 CLI: ast-grep scan --rule <temp-rule.yml> --json=stream src/`,
 
       inputSchema: {
-        type: 'object',
+        type: "object",
         properties: {
           id: {
-            type: 'string',
-            description: 'Unique rule identifier in kebab-case. Example: "no-console-log", "prefer-const"'
+            type: "string",
+            description:
+              'Unique rule identifier in kebab-case. Example: "no-console-log", "prefer-const"',
           },
           language: {
-            type: 'string',
-            description: 'Programming language (js/ts/py/rust/go/java/cpp). Required for all rules.'
+            type: "string",
+            description:
+              "Programming language (js/ts/py/rust/go/java/cpp). Required for all rules.",
           },
           pattern: {
-            type: 'string',
-            description: 'Simple AST pattern string. Use either pattern OR rule, not both.'
+            type: "string",
+            description: "Simple AST pattern string. Use either pattern OR rule, not both.",
           },
           rule: {
-            type: 'object',
-            description: 'Structural rule object (kind/has/inside/all/any/not). Use either pattern OR rule, not both.'
+            type: "object",
+            description:
+              "Structural rule object (kind/has/inside/all/any/not). Use either pattern OR rule, not both.",
           },
           message: {
-            type: 'string',
-            description: 'Human-readable issue description. Defaults to rule ID if omitted.'
+            type: "string",
+            description: "Human-readable issue description. Defaults to rule ID if omitted.",
           },
           severity: {
-            type: 'string',
-            enum: ['error', 'warning', 'info'],
-            description: 'Finding severity. error=critical, warning=default, info=suggestion.'
+            type: "string",
+            enum: ["error", "warning", "info"],
+            description: "Finding severity. error=critical, warning=default, info=suggestion.",
           },
           where: {
-            type: 'array',
+            type: "array",
             items: {
-              type: 'object',
+              type: "object",
               properties: {
                 metavariable: {
-                  type: 'string',
-                  description: 'Metavariable name from pattern (without $ prefix)'
+                  type: "string",
+                  description: "Metavariable name from pattern (without $ prefix)",
                 },
                 regex: {
-                  type: 'string',
-                  description: 'Regex pattern to match metavariable content'
+                  type: "string",
+                  description: "Regex pattern to match metavariable content",
                 },
                 equals: {
-                  type: 'string',
-                  description: 'Exact string to match metavariable content'
-                }
+                  type: "string",
+                  description: "Exact string to match metavariable content",
+                },
               },
-              required: ['metavariable']
+              required: ["metavariable"],
             },
-            description: 'Constraints on pattern metavariables. Each must reference a metavariable from pattern.'
+            description:
+              "Constraints on pattern metavariables. Each must reference a metavariable from pattern.",
           },
           fix: {
-            type: 'string',
-            description: 'Fix template using pattern metavariables. Can reorder, duplicate, or omit variables.'
+            type: "string",
+            description:
+              "Fix template using pattern metavariables. Can reorder, duplicate, or omit variables.",
           },
           paths: {
-            type: 'array',
-            items: { type: 'string' },
-            description: 'File/directory paths to scan within workspace. Omit for entire workspace.'
+            type: "array",
+            items: { type: "string" },
+            description:
+              "File/directory paths to scan within workspace. Omit for entire workspace.",
           },
           code: {
-            type: 'string',
-            description: 'Inline code to scan. Use for testing rules before file scanning.'
+            type: "string",
+            description: "Inline code to scan. Use for testing rules before file scanning.",
           },
           timeoutMs: {
-            type: 'number',
-            description: 'Timeout in milliseconds (1000-300000). Default: 30000. Increase for large repos.'
-          }
+            type: "number",
+            description:
+              "Timeout in milliseconds (1000-300000). Default: 30000. Increase for large repos.",
+          },
         },
-        required: ['id', 'language'],
-        additionalProperties: false
-      }
+        required: ["id", "language"],
+        additionalProperties: false,
+      },
     };
   }
 }

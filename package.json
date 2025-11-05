@@ -15,9 +15,19 @@
     "clean": "rm -rf build",
     "prepublishOnly": "npm run build",
     "test:bun": "bun test",
-    "test:unit": "bun test tests/validation.test.ts",
-    "test:integration": "bun test tests/integration.test.ts",
-    "test:all": "bun test"
+    "test:unit": "bun test tests/validation.test.ts tests/binary-manager.test.ts",
+    "test:integration": "bun test tests/integration.test.ts tests/cli-flag-mapping.test.ts",
+    "test:all": "bun test",
+    "test:cli-mapping": "bun test tests/cli-flag-mapping.test.ts",
+    "test:cli-mapping:verbose": "bun test tests/cli-flag-mapping.test.ts --verbose",
+    "test:cli-mapping:coverage": "bun test tests/cli-flag-mapping.test.ts --coverage",
+    "test:binary-manager": "bun test tests/binary-manager.test.ts",
+    "test:binary-manager:verbose": "bun test tests/binary-manager.test.ts --verbose",
+    "test:binary-manager:coverage": "bun test tests/binary-manager.test.ts --coverage",
+    "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"tests/**/*.ts\"",
+    "lint": "eslint \"src/**/*.ts\" \"tests/**/*.ts\"",
+    "lint:fix": "eslint \"src/**/*.ts\" \"tests/**/*.ts\" --fix"
   },
   "keywords": [
     "mcp",
@@ -48,9 +58,16 @@
     "zod": "^4.1.12"
   },
   "devDependencies": {
-    "cross-env": "^10.1.0",
+    "@types/bun": "^1.3.1",
+    "@types/js-yaml": "^4.0.9",
     "@types/node": "^24.10.0",
+    "@typescript-eslint/eslint-plugin": "^8.46.3",
+    "@typescript-eslint/parser": "^8.46.3",
     "c8": "^10.1.3",
+    "cross-env": "^10.1.0",
+    "eslint": "^9.39.1",
+    "js-yaml": "^4.1.0",
+    "prettier": "^3.6.2",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3"
   },

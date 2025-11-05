@@ -1,7 +1,41 @@
-import { AstGrepBinaryManager } from '../core/binary-manager.js';
-import { WorkspaceManager } from '../core/workspace-manager.js';
-import { ValidationError, ExecutionError } from '../types/errors.js';
-import { PatternValidator, ParameterValidator } from '../utils/validation.js';
+import { AstGrepBinaryManager } from "../core/binary-manager.js";
+import { WorkspaceManager } from "../core/workspace-manager.js";
+import { ValidationError, ExecutionError } from "../types/errors.js";
+import { PatternValidator, ParameterValidator, PathValidator } from "../utils/validation.js";
+
+interface SearchParams {
+  pattern: string;
+  language?: string;
+  paths?: string[];
+  code?: string;
+  context?: number;
+  maxMatches?: number;
+  timeoutMs?: number;
+}
+
+interface MatchEntry {
+  file: string;
+  line: number;
+  column: number;
+  text: string;
+  context?: {
+    before: string[];
+    after: string[];
+  };
+}
+
+interface SearchResult {
+  matches: MatchEntry[];
+  skippedLines: number;
+  totalMatches?: number;
+  filesMatched?: number;
+  summary: {
+    totalMatches: number;
+    truncated: boolean;
+    skippedLines: number;
+    executionTime: number;
+  };
+}
 
 /**
  * Direct search tool that calls ast-grep run with minimal overhead
@@ -12,18 +46,23 @@ export class SearchTool {
     private workspaceManager: WorkspaceManager
   ) {}
 
-  async execute(params: any): Promise<any> {
+  async execute(paramsRaw: Record<string, unknown>): Promise<SearchResult> {
+    // Runtime parameter validation with type narrowing
+    const params = paramsRaw as unknown as SearchParams;
+
     // Validate pattern
-    if (!params.pattern || typeof params.pattern !== 'string') {
-      throw new ValidationError('Pattern is required and must be a string');
+    if (!params.pattern || typeof params.pattern !== "string") {
+      throw new ValidationError("Pattern is required and must be a string");
     }
 
-    const patternValidation = PatternValidator.validatePattern(params.pattern, params.language);
+    const patternValidation = PatternValidator.validatePattern(
+      params.pattern,
+      typeof params.language === "string" ? params.language : undefined
+    );
     if (!patternValidation.valid) {
-      throw new ValidationError(
-        `Invalid pattern: ${patternValidation.errors.join('; ')}`,
-        { errors: patternValidation.errors }
-      );
+      throw new ValidationError(`Invalid pattern: ${patternValidation.errors.join("; ")}`, {
+        errors: patternValidation.errors,
+      });
     }
 
     // Log warnings if any - log each warning individually for better test assertions
@@ -36,95 +75,137 @@ export class SearchTool {
     // Validate optional parameters with actionable error messages
     const contextValidation = ParameterValidator.validateContext(params.context);
     if (!contextValidation.valid) {
-      throw new ValidationError(contextValidation.errors.join('; '), { errors: contextValidation.errors });
+      throw new ValidationError(contextValidation.errors.join("; "), {
+        errors: contextValidation.errors,
+      });
     }
 
     const maxMatchesValidation = ParameterValidator.validateMaxMatches(params.maxMatches);
     if (!maxMatchesValidation.valid) {
-      throw new ValidationError(maxMatchesValidation.errors.join('; '), { errors: maxMatchesValidation.errors });
+      throw new ValidationError(maxMatchesValidation.errors.join("; "), {
+        errors: maxMatchesValidation.errors,
+      });
     }
 
     const timeoutValidation = ParameterValidator.validateTimeout(params.timeoutMs);
     if (!timeoutValidation.valid) {
-      throw new ValidationError(timeoutValidation.errors.join('; '), { errors: timeoutValidation.errors });
+      throw new ValidationError(timeoutValidation.errors.join("; "), {
+        errors: timeoutValidation.errors,
+      });
     }
 
     const codeValidation = ParameterValidator.validateCode(params.code);
     if (!codeValidation.valid) {
-      throw new ValidationError(codeValidation.errors.join('; '), { errors: codeValidation.errors });
+      throw new ValidationError(codeValidation.errors.join("; "), {
+        errors: codeValidation.errors,
+      });
     }
 
     // Normalize language aliases when provided
     const normalizeLang = (lang: string) => {
       const map: Record<string, string> = {
-        javascript: 'js',
-        typescript: 'ts',
-        jsx: 'jsx',
-        tsx: 'tsx',
-        python: 'py',
-        py: 'py',
-        rust: 'rs',
-        rs: 'rs',
-        golang: 'go',
-        go: 'go',
-        java: 'java',
-        'c++': 'cpp',
-        cpp: 'cpp',
-        c: 'c',
-        kotlin: 'kt',
-        kt: 'kt',
+        javascript: "js",
+        typescript: "ts",
+        jsx: "jsx",
+        tsx: "tsx",
+        python: "py",
+        py: "py",
+        rust: "rs",
+        rs: "rs",
+        golang: "go",
+        go: "go",
+        java: "java",
+        "c++": "cpp",
+        cpp: "cpp",
+        c: "c",
+        kotlin: "kt",
+        kt: "kt",
       };
-      const lower = (lang || '').toLowerCase();
+      const lower = (lang || "").toLowerCase();
       return map[lower] || lang;
     };
 
     // Build ast-grep command directly
-    const args = ['run', '--pattern', params.pattern.trim()];
+    const args = ["run", "--pattern", params.pattern.trim()];
 
     // Add language if provided
     if (params.language) {
-      args.push('--lang', normalizeLang(params.language));
+      args.push("--lang", normalizeLang(params.language));
     }
 
     // Always use JSON stream for parsing
-    args.push('--json=stream');
+    args.push("--json=stream");
 
     // Add context if requested
     if (params.context && params.context > 0) {
-      args.push('--context', params.context.toString());
+      args.push("--context", params.context.toString());
     }
 
     // Handle inline code vs file paths
-    let executeOptions: any = {
+    const executeOptions: {
+      cwd: string;
+      timeout: number;
+      stdin?: string;
+    } = {
       cwd: this.workspaceManager.getWorkspaceRoot(),
-      timeout: params.timeoutMs || 30000
+      timeout: params.timeoutMs || 30000,
     };
 
     if (params.code) {
       // Inline code mode
-      args.push('--stdin');
+      args.push("--stdin");
       if (!params.language) {
-        throw new ValidationError('Language required for inline code');
+        throw new ValidationError("Language required for inline code");
       }
       executeOptions.stdin = params.code;
     } else {
       // File mode - add paths (default to current directory)
-      const inputPaths: string[] = params.paths && Array.isArray(params.paths) && params.paths.length > 0 ? params.paths : ['.'];
-      const { valid, resolvedPaths, errors } = this.workspaceManager.validatePaths(inputPaths);
+      // Filter out empty strings and convert them to "."
+      const inputPaths: string[] =
+        params.paths && Array.isArray(params.paths) && params.paths.length > 0
+          ? params.paths.map((p) => (p === "" ? "." : p)).filter((p) => p !== "")
+          : ["."];
+
+      // Normalize paths for ast-grep compatibility (Windows -> forward slashes)
+      // Empty strings should be treated as current directory
+      const normalizedPaths = inputPaths.map((p) =>
+        p === "" ? "." : PathValidator.normalizePath(p)
+      );
+
+      // Validate paths for security (but don't use the absolute resolved paths)
+      const { valid, errors } = this.workspaceManager.validatePaths(normalizedPaths);
       if (!valid) {
-        const errorDetail = errors.length > 0 ? `: ${errors[0]}` : '';
-        throw new ValidationError(`Invalid paths${errorDetail}`, { errors });
+        // Replace normalized paths in error messages with original paths
+        const originalErrors = errors.map((err) => {
+          let modifiedErr = err;
+          for (let i = 0; i < normalizedPaths.length; i++) {
+            if (normalizedPaths[i] !== inputPaths[i]) {
+              modifiedErr = modifiedErr.replace(normalizedPaths[i], inputPaths[i]);
+            }
+          }
+          return modifiedErr;
+        });
+        const errorDetail = originalErrors.length > 0 ? `: ${originalErrors[0]}` : "";
+        throw new ValidationError(`Invalid paths${errorDetail}`, { errors: originalErrors });
       }
+
       // Try to infer language if not provided (based on extension of first path when it is a file)
-      if (!params.language && resolvedPaths.length === 1) {
-        const first = resolvedPaths[0].toLowerCase();
-        const inferred = first.endsWith('.ts') ? 'ts' :
-                         first.endsWith('.tsx') ? 'tsx' :
-                         first.endsWith('.jsx') ? 'jsx' :
-                         first.endsWith('.js') ? 'js' : undefined;
-        if (inferred) args.push('--lang', inferred);
+      if (!params.language && normalizedPaths.length === 1) {
+        const first = normalizedPaths[0].toLowerCase();
+        const inferred = first.endsWith(".ts")
+          ? "ts"
+          : first.endsWith(".tsx")
+            ? "tsx"
+            : first.endsWith(".jsx")
+              ? "jsx"
+              : first.endsWith(".js")
+                ? "js"
+                : undefined;
+        if (inferred) args.push("--lang", inferred);
       }
-      args.push(...resolvedPaths);
+
+      // Pass normalized paths to ast-grep (not absolute resolved paths)
+      args.push(...normalizedPaths);
     }
 
     try {
@@ -136,8 +217,8 @@ export class SearchTool {
     }
   }
 
-  private parseResults(stdout: string, params: any): any {
-    const matches: any[] = [];
+  private parseResults(stdout: string, params: SearchParams): SearchResult {
+    const matches: MatchEntry[] = [];
     let skippedLines = 0;
 
     if (!stdout.trim()) {
@@ -146,36 +227,44 @@ export class SearchTool {
         skippedLines: 0,
         summary: {
           totalMatches: 0,
+          truncated: false,
+          skippedLines: 0,
           executionTime: 0,
-          skippedLines: 0
-        }
+        },
       };
     }
 
     // Parse JSONL output
-    const lines = stdout.trim().split('\n');
+    const lines = stdout.trim().split("\n");
     for (const line of lines) {
       if (!line.trim()) continue;
       try {
-        const match = JSON.parse(line);
+        const match = JSON.parse(line) as {
+          file?: string;
+          range?: { start?: { line?: number; column?: number } };
+          text?: string;
+          context?: { before?: string[]; after?: string[] };
+        };
         matches.push({
-          file: match.file || '',
+          file: match.file || "",
           line: (match.range?.start?.line || 0) + 1, // Convert to 1-based
           column: match.range?.start?.column || 0,
-          text: match.text || '',
+          text: match.text || "",
           context: {
             before: match.context?.before || [],
-            after: match.context?.after || []
-          }
+            after: match.context?.after || [],
+          },
         });
-      } catch (e) {
+      } catch {
         skippedLines++;
         console.error(`Warning: Skipped malformed JSON line: ${line.substring(0, 100)}...`);
       }
     }
 
     if (skippedLines > 0) {
-      console.error(`Warning: Skipped ${skippedLines} malformed result lines out of ${lines.length} total lines`);
+      console.error(
+        `Warning: Skipped ${skippedLines} malformed result lines out of ${lines.length} total lines`
+      );
     }
 
     const maxMatches = params.maxMatches || 100;
@@ -186,14 +275,14 @@ export class SearchTool {
         totalMatches: matches.length,
         truncated: matches.length > maxMatches,
         skippedLines,
-        executionTime: 0 // We don't need precise timing
-      }
+        executionTime: 0, // We don't need precise timing
+      },
     };
   }
 
   static getSchema() {
     return {
-      name: 'ast_search',
+      name: "ast_search",
       description: `Structural code search using AST pattern matching. Searches code by syntax tree structure, not text matching. Returns file locations, line numbers, and matched code with context.
 
 QUICK START:
@@ -339,41 +428,48 @@ Example: { pattern: "console.log($ARG)", paths: ["src/"], language: "js", contex
 CLI: ast-grep run --pattern "console.log($ARG)" --lang js --context 2 --json=stream src/`,
 
       inputSchema: {
-        type: 'object',
+        type: "object",
         properties: {
           pattern: {
-            type: 'string',
-            description: 'AST pattern with metavariables ($VAR, $$$NAME, $_). Must be valid syntax for target language.'
+            type: "string",
+            description:
+              "AST pattern with metavariables ($VAR, $$$NAME, $_). Must be valid syntax for target language.",
           },
           code: {
-            type: 'string',
-            description: 'Inline code to search. Requires language parameter. Use for testing patterns.'
+            type: "string",
+            description:
+              "Inline code to search. Requires language parameter. Use for testing patterns.",
           },
           paths: {
-            type: 'array',
-            items: { type: 'string' },
-            description: 'File/directory paths within workspace. Omit to search entire workspace. Security validated.'
+            type: "array",
+            items: { type: "string" },
+            description:
+              "File/directory paths within workspace. Omit to search entire workspace. Security validated.",
           },
           language: {
-            type: 'string',
-            description: 'Programming language (js/ts/py/java/rust/go/cpp). Required for inline code, recommended for paths.'
+            type: "string",
+            description:
+              "Programming language (js/ts/py/java/rust/go/cpp). Required for inline code, recommended for paths.",
           },
           context: {
-            type: 'number',
-            description: 'Context lines around matches (0-100). Default: 3. Higher values increase output size.'
+            type: "number",
+            description:
+              "Context lines around matches (0-100). Default: 3. Higher values increase output size.",
           },
           maxMatches: {
-            type: 'number',
-            description: 'Maximum matches to return (1-10000). Default: 100. Check summary.truncated if limited.'
+            type: "number",
+            description:
+              "Maximum matches to return (1-10000). Default: 100. Check summary.truncated if limited.",
           },
           timeoutMs: {
-            type: 'number',
-            description: 'Timeout in milliseconds (1000-300000). Default: 30000. Increase for large repos.'
-          }
+            type: "number",
+            description:
+              "Timeout in milliseconds (1000-300000). Default: 30000. Increase for large repos.",
+          },
         },
-        required: ['pattern'],
-        additionalProperties: false
-      }
+        required: ["pattern"],
+        additionalProperties: false,
+      },
     };
   }
 }

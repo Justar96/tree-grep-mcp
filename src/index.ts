@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { AstGrepBinaryManager } from './core/binary-manager.js';
-import { InstallationOptions } from './types/errors.js';
-import { WorkspaceManager } from './core/workspace-manager.js';
-import { SearchTool } from './tools/search.js';
-import { ReplaceTool } from './tools/replace.js';
-import { ScanTool } from './tools/scan.js';
-import { BinaryError, ValidationError, ExecutionError } from './types/errors.js';
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { AstGrepBinaryManager } from "./core/binary-manager.js";
+import { InstallationOptions } from "./types/errors.js";
+import { WorkspaceManager } from "./core/workspace-manager.js";
+import { SearchTool } from "./tools/search.js";
+import { ReplaceTool } from "./tools/replace.js";
+import { ScanTool } from "./tools/scan.js";
+import { BinaryError, ValidationError, ExecutionError } from "./types/errors.js";
 // Removed complex schema imports - using simple any types now
 
 /**
@@ -22,15 +22,15 @@ function parseArgs(): InstallationOptions {
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
 
-    if (arg === '--use-system') {
+    if (arg === "--use-system") {
       options.useSystem = true;
-    } else if (arg === '--auto-install') {
+    } else if (arg === "--auto-install") {
       options.autoInstall = true;
-    } else if (arg.startsWith('--platform=')) {
-      options.platform = arg.split('=')[1] as any;
-    } else if (arg.startsWith('--cache-dir=')) {
-      options.cacheDir = arg.split('=')[1];
-    } else if (arg === '--help' || arg === '-h') {
+    } else if (arg.startsWith("--platform=")) {
+      options.platform = arg.split("=")[1] as "win32" | "darwin" | "linux" | "auto";
+    } else if (arg.startsWith("--cache-dir=")) {
+      options.cacheDir = arg.split("=")[1];
+    } else if (arg === "--help" || arg === "-h") {
       printHelp();
       process.exit(0);
     }
@@ -116,8 +116,8 @@ async function main(): Promise<void> {
     // Create MCP server
     const server = new Server(
       {
-        name: 'tree-ast-grep',
-        version: '1.0.0',
+        name: "tree-ast-grep",
+        version: "1.0.0",
       },
       {
         capabilities: {
@@ -129,11 +129,7 @@ async function main(): Promise<void> {
     // List available tools
     server.setRequestHandler(ListToolsRequestSchema, async () => {
       return {
-        tools: [
-          SearchTool.getSchema(),
-          ReplaceTool.getSchema(),
-          ScanTool.getSchema(),
-        ],
+        tools: [SearchTool.getSchema(), ReplaceTool.getSchema(), ScanTool.getSchema()],
       };
     });
 
@@ -143,34 +139,34 @@ async function main(): Promise<void> {
 
       try {
         switch (name) {
-          case 'ast_search':
-            const searchResult = await searchTool.execute(args);
+          case "ast_search":
+            const searchResult = await searchTool.execute(args as Record<string, unknown>);
             return {
               content: [
                 {
-                  type: 'text',
+                  type: "text",
                   text: JSON.stringify(searchResult, null, 2),
                 },
               ],
             };
 
-          case 'ast_replace':
-            const replaceResult = await replaceTool.execute(args);
+          case "ast_replace":
+            const replaceResult = await replaceTool.execute(args as Record<string, unknown>);
             return {
               content: [
                 {
-                  type: 'text',
+                  type: "text",
                   text: JSON.stringify(replaceResult, null, 2),
                 },
               ],
             };
 
-          case 'ast_run_rule':
-            const scanResult = await scanTool.execute(args);
+          case "ast_run_rule":
+            const scanResult = await scanTool.execute(args as Record<string, unknown>);
             return {
               content: [
-                { type: 'text', text: scanResult.yaml },
-                { type: 'text', text: `\n---\n${JSON.stringify(scanResult.scan, null, 2)}` },
+                { type: "text", text: scanResult.yaml },
+                { type: "text", text: `\n---\n${JSON.stringify(scanResult.scan, null, 2)}` },
               ],
             };
 
@@ -179,13 +175,13 @@ async function main(): Promise<void> {
         }
       } catch (error) {
         // Handle different error types
-        let errorMessage = 'An unknown error occurred';
+        let errorMessage = "An unknown error occurred";
         let isRecoverable = false;
 
         if (error instanceof ValidationError) {
           errorMessage = `Validation Error: ${error.message}`;
-          if (error.context?.errors) {
-            errorMessage += `\nDetails: ${error.context.errors.join(', ')}`;
+          if (error.context?.errors && Array.isArray(error.context.errors)) {
+            errorMessage += `\nDetails: ${(error.context.errors as string[]).join(", ")}`;
           }
           isRecoverable = true;
         } else if (error instanceof BinaryError) {
@@ -202,7 +198,7 @@ async function main(): Promise<void> {
         return {
           content: [
             {
-              type: 'text',
+              type: "text",
               text: errorMessage,
             },
           ],
@@ -215,29 +211,26 @@ async function main(): Promise<void> {
     const transport = new StdioServerTransport();
     await server.connect(transport);
 
-    console.error('tree-ast-grep MCP server running on stdio');
-
+    console.error("tree-ast-grep MCP server running on stdio");
   } catch (error) {
-    console.error('Failed to start MCP server:', error);
+    console.error("Failed to start MCP server:", error);
     process.exit(1);
   }
 }
 
 // Handle graceful shutdown
-process.on('SIGINT', () => {
-  console.error('Shutting down tree-ast-grep MCP server...');
+process.on("SIGINT", () => {
+  console.error("Shutting down tree-ast-grep MCP server...");
   process.exit(0);
 });
 
-process.on('SIGTERM', () => {
-  console.error('Shutting down tree-ast-grep MCP server...');
+process.on("SIGTERM", () => {
+  console.error("Shutting down tree-ast-grep MCP server...");
   process.exit(0);
 });
 
 // Start the server
 main().catch((error) => {
-  console.error('Unhandled error:', error);
+  console.error("Unhandled error:", error);
   process.exit(1);
 });
-
-

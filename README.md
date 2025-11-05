@@ -203,8 +203,94 @@ bun run build
 # Run tests
 bun test
 
+# Binary manager suite
+bun run test:binary-manager
+
+# Coverage for binary manager
+bun run test:binary-manager:coverage
+
 # Development mode
 bun run dev:bun
+```
+
+## Testing
+
+The test suite includes three main categories:
+
+### 1. CLI Flag Mapping Tests (`tests/cli-flag-mapping.test.ts`)
+
+Verifies that MCP parameters correctly map to ast-grep CLI flags. Uses command interception to capture CLI arguments without executing ast-grep.
+
+**Test Coverage:**
+- SearchTool: `--pattern`, `--lang`, `--json=stream`, `--context`, `--stdin`, positional paths
+- ReplaceTool: `--pattern`, `--rewrite`, `--lang`, `--update-all`, `--stdin`, positional paths
+- ScanTool: `--rule`, `--json=stream`, temp file paths, YAML generation
+- Language normalization (javascript→js, typescript→ts, python→py, rust→rs, golang→go, c++→cpp)
+- Path handling and validation
+- Temp file lifecycle (creation, cleanup)
+
+**Run CLI flag mapping tests:**
+```bash
+bun run test:cli-mapping              # Run CLI flag mapping tests
+bun run test:cli-mapping:verbose      # Verbose output for debugging
+bun run test:cli-mapping:coverage     # Coverage reporting
+```
+
+**CLI Compliance Verified:**
+
+| Tool | Verified Flags |
+|------|----------------|
+| `ast_search` | `run`, `--pattern`, `--lang`, `--json=stream`, `--context`, `--stdin`, `<paths>` |
+| `ast_replace` | `run`, `--pattern`, `--rewrite`, `--lang`, `--update-all`, `--stdin`, `<paths>` |
+| `ast_run_rule` | `scan`, `--rule`, `--json=stream`, `<paths>` |
+
+All flags verified against ast-grep documentation (AST_GREP_ALL_DOCUMENTS.md lines 355-814).
+
+### 2. Integration Tests (`tests/integration.test.ts`)
+
+End-to-end tests using real ast-grep binary execution. 87 comprehensive tests covering:
+- Search-then-replace workflows (inline code + file-based)
+- Rule creation with constraints and fixes
+- Multi-language support (JS, TS, Python, Rust, Go, Java, C++)
+- Error handling and validation
+- Timeout handling and process cleanup
+- Stdin vs file mode behavior
+- Context parameter edge cases
+- Dry-run vs update-all behavior
+- JSON stream format verification
+
+**Run integration tests:**
+```bash
+bun run test:integration             # Run all integration tests (includes CLI flag mapping)
+INTEGRATION_TESTS=1 bun test         # Force integration tests (fail if ast-grep missing)
+```
+
+### 3. Binary Manager Tests (`tests/binary-manager.test.ts`)
+
+Dedicated test suite for binary management with ≥95% coverage expectations.
+
+**Run binary manager tests:**
+```bash
+bun run test:binary-manager          # Run suite in isolation
+bun run test:binary-manager:verbose  # Verbose logging for debugging
+bun run test:binary-manager:coverage # Collect coverage numbers
+```
+
+### Test Infrastructure
+
+- **No mocking policy**: Tests use real binaries and filesystem interactions by design
+- **Environment variables:**
+  - `TEST_SKIP_NETWORK=1` – skips download tests when network access is unavailable
+  - `TEST_BINARY_CACHE_DIR=<path>` – points binary cache at a custom directory for CI or reproducible runs
+  - `INTEGRATION_TESTS=1` – forces integration tests in CI pipelines (fails if ast-grep missing)
+- **Requirements**: Integration and binary manager tests require a working ast-grep CLI (install manually or pass `--auto-install`)
+
+### Run All Tests
+
+```bash
+bun test                              # Run all test suites
+bun run test:all                      # Alias for bun test
+bun run test:unit                     # Run only unit tests (validation, binary manager)
 ```
 
 ## Requirements
@@ -221,3 +307,9 @@ MIT License
 - GitHub: https://github.com/justar96/tree-grep-mcp
 - npm: https://www.npmjs.com/package/@cabbages/tree-grep
 - ast-grep: https://github.com/ast-grep/ast-grep
+
+---
+
+## Early Version Notice
+
+This project is in early development. If you encounter any issues, bugs, or have feature requests, please report them on our [GitHub Issues](https://github.com/justar96/tree-grep-mcp/issues) page. Your feedback is extremely valuable and helps improve the project for everyone!
