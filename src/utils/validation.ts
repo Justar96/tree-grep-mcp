@@ -206,7 +206,7 @@ export class PatternValidator {
 
     // Python-specific checks
     if (normalizedLang === 'py') {
-      if (/@[a-zA-Z]/.test(pattern)) {
+      if (/@[a-zA-Z$_]/.test(pattern)) {
         warnings.push(
           'Python decorators (@decorator) require exact AST structure. ' +
           'Use structural rules for reliable matching. ' +
@@ -229,7 +229,7 @@ export class PatternValidator {
           'Use structural rules with \'kind\' and \'has\' constraints for reliable matching.'
         );
       }
-      if (/<[A-Z][a-zA-Z0-9_]*>/.test(pattern) && !pattern.includes('</')) {
+      if (/<[A-Z$][a-zA-Z0-9_$]*>/.test(pattern) && !pattern.includes('</')) {
         warnings.push(
           'Generic type parameters may require structural rules for complex cases. ' +
           'Test pattern thoroughly to ensure it matches intended constructs.'

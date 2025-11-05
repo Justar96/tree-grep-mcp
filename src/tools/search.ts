@@ -26,9 +26,11 @@ export class SearchTool {
       );
     }
 
-    // Log warnings if any
+    // Log warnings if any - log each warning individually for better test assertions
     if (patternValidation.warnings && patternValidation.warnings.length > 0) {
-      console.error('Pattern warnings:', patternValidation.warnings.join('; '));
+      for (const warning of patternValidation.warnings) {
+        console.error(`Warning: ${warning}`);
+      }
     }
 
     // Validate optional parameters with actionable error messages
@@ -192,179 +194,181 @@ export class SearchTool {
   static getSchema() {
     return {
       name: 'ast_search',
-      description: `Search code using AST pattern matching (structural search, not text search).
+      description: `Structural code search using AST pattern matching. Searches code by syntax tree structure, not text matching. Returns file locations, line numbers, and matched code with context.
 
-WHEN TO USE THIS TOOL:
-• Quick searches for specific code patterns across files
-• Finding all occurrences of a pattern (e.g., all console.log calls)
-• Exploring codebase structure without creating rules
-• Testing patterns before creating formal rules with ast_run_rule
+QUICK START:
+Search JavaScript files for console.log calls:
+{ "pattern": "console.log($ARG)", "paths": ["src/"], "language": "javascript" }
 
-WHEN TO USE ast_run_rule INSTEAD:
-• Need to add constraints on metavariables (e.g., only match specific variable names)
-• Want to provide fix suggestions
-• Need to categorize findings by severity
-• Building reusable rules for code quality checks
+Search inline code (language REQUIRED):
+{ "pattern": "console.log($ARG)", "code": "console.log('test');", "language": "javascript" }
 
-PATTERN SYNTAX GUIDE:
-• $VAR - matches single AST node (expression, identifier, statement)
-• $$$NAME - matches zero or more nodes (MUST be named, never use bare $$$)
-• $_ - anonymous single match (when you don't need to reference it)
+WHEN TO USE:
+• Find all occurrences of a code pattern across files
+• Explore codebase structure (e.g., all function definitions, class declarations)
+• Test patterns quickly before building formal rules
+• Search specific code snippets for testing
 
-METAVARIABLE RULES:
-1. $_ (anonymous) cannot be referenced in replacements or constraints - use only for matching
-2. $NAME must be used as a complete AST node unit and must be named (not bare $)
-3. All metavariables must correspond to complete, valid AST nodes in the target language
-4. Multi-node $$$NAME must always be named - bare $$$ is rejected
+WHEN NOT TO USE:
+• Need metavariable constraints (e.g., $VAR must match "foo") → Use ast_run_rule with constraints
+• Want to provide fix suggestions → Use ast_run_rule with fix parameter
+• Need severity levels or categorization → Use ast_run_rule
+• Text-based search (grep strings) → Use grep/ripgrep tools instead
 
-COMMON PATTERNS BY USE CASE:
-1. Function calls with specific argument count:
-   - Any args: "functionName($$$ARGS)"
-   - Exactly 1: "functionName($ARG)"
-   - Exactly 2: "functionName($A, $B)"
-   - First + rest: "functionName($FIRST, $$$REST)"
+PATTERN SYNTAX:
+• $VAR - Single AST node (expression, identifier, statement)
+• $$$NAME - Multiple nodes, MUST be named (bare $$$ rejected)
+• $_ - Anonymous match (use when you don't need to reference it)
+
+Metavariable rules:
+1. Must be complete AST nodes: Use "$OBJ.$PROP", not "$VAR.prop"
+2. Multi-node must be named: "$$$ARGS" not "$$$"
+3. Language-specific: JavaScript patterns won't work in Python
+4. Match structure, not text: "foo" won't match "foobar"
+
+COMMON PATTERNS:
+
+1. Function calls:
+   Any arguments: "functionName($$$ARGS)"
+   Exactly one: "functionName($ARG)"
+   Exactly two: "functionName($A, $B)"
+   First + rest: "functionName($FIRST, $$$REST)"
 
 2. Function definitions:
-   - Any function: "function $NAME($$$PARAMS) { $$$BODY }"
-   - Arrow function: "($$$PARAMS) => $BODY"
-   - Method: "$OBJ.$METHOD = function($$$PARAMS) { $$$BODY }"
+   Any function: "function $NAME($$$PARAMS) { $$$BODY }"
+   Arrow function: "($$$PARAMS) => $BODY"
+   Method: "$OBJ.$METHOD = function($$$PARAMS) { $$$BODY }"
 
 3. Class patterns:
-   - Class definition: "class $NAME { $$$MEMBERS }"
-   - Class with extends: "class $NAME extends $BASE { $$$MEMBERS }"
+   Basic: "class $NAME { $$$MEMBERS }"
+   With extends: "class $NAME extends $BASE { $$$MEMBERS }"
 
 4. Control flow:
-   - If statement: "if ($COND) { $$$BODY }"
-   - Try-catch: "try { $$$TRY } catch ($ERR) { $$$CATCH }"
+   If statement: "if ($COND) { $$$BODY }"
+   Try-catch: "try { $$$TRY } catch ($ERR) { $$$CATCH }"
 
-5. Object/Array operations:
-   - Method call: "$OBJ.$METHOD($$$ARGS)"
-   - Property access: "$OBJ.$PROP"
-   - Destructuring: "const { $$$PROPS } = $OBJ"
+5. Object operations:
+   Method call: "$OBJ.$METHOD($$$ARGS)"
+   Property access: "$OBJ.$PROP"
+   Destructuring: "const { $$$PROPS } = $OBJ"
 
-PATH VALIDATION:
-• All paths are validated to be within the workspace root (prevents directory escape attacks)
-• Omitting paths parameter defaults to current workspace root directory (".")
-• Paths can be relative (e.g., "src/") or absolute (must be within workspace)
-• Invalid paths (outside workspace, non-existent) will fail with ValidationError
-• Example: paths: ["src/components", "lib/utils"] searches two directories
-• Example: omit paths entirely to search the entire workspace
+JSX/TSX (set language to 'jsx' or 'tsx'):
+   Element: "<$COMPONENT $$$ATTRS>" or "<$TAG>$$$CHILDREN</$TAG>"
+   Attribute: "<div $ATTR={$VALUE}>"
+   Event handler: "<Button onClick={$HANDLER}>"
+   WARNING: Broad patterns like "<$TAG>" match thousands of elements - be specific
 
-MODES OF OPERATION:
-1. File/Directory Mode (default):
-   - Specify paths parameter or omit for current directory
-   - Language is optional but recommended for better performance
-   - Example: { pattern: "console.log($$$ARGS)", paths: ["src/"], language: "javascript" }
+ERROR RECOVERY:
 
-2. Inline Code Mode:
-   - Use code parameter to search specific code snippet
-   - **IMPORTANT: Language is REQUIRED in this mode - the tool will fail with ValidationError if omitted**
-   - Useful for testing patterns before applying to codebase
-   - Minimal working example:
-     {
-       pattern: "console.log($ARG)",
-       code: "console.log('test'); foo();",
-       language: "javascript"
-     }
-   - Without language parameter: ValidationError: "Language required for inline code"
+If search fails, check these common issues:
 
-JSX/TSX PATTERN MATCHING:
-When searching JSX/TSX code, set language to 'jsx' or 'tsx':
-• Match elements: "<$COMPONENT $$$ATTRS>" or "<$TAG>$$$CHILDREN</$TAG>"
-• Match attribute names: "<div $ATTR={$VALUE}>"
-• Match attribute values: "<Button onClick={$HANDLER}>"
-• Example: pattern="<$COMPONENT className={$CLASS}>" matches "<Button className={styles.primary}>"
-• WARNING: Overly broad patterns like "<$TAG>" can match thousands of elements in large codebases
-• RECOMMENDATION: Add constraints or be specific with component/attribute patterns
+1. "Language required for inline code"
+   → Add language parameter when using code parameter
+   → Example: { pattern: "$P", code: "test", language: "javascript" }
 
-IMPORTANT LIMITATIONS:
-• Patterns match AST structure, not text - "foo" won't match "foobar"
-• Metavariables must be complete AST nodes - "$VAR.prop" won't work, use "$OBJ.$PROP"
-• Multi-node metavariables ($$$) MUST be named - bare $$$ is rejected
-• Pattern syntax is language-specific - JavaScript patterns won't work for Python
+2. "Invalid paths"
+   → Use relative paths within workspace (e.g., "src/", not "/etc/")
+   → Paths validated against workspace root for security
+   → Omit paths to search entire workspace
 
-RESULT TRUNCATION:
-• maxMatches parameter limits the number of returned items (default: 100)
-• summary.totalMatches reports the full count of all matches found
-• summary.truncated indicates whether results were truncated (true if totalMatches > maxMatches)
-• Recommended maxMatches by repo size:
-  - Small repos (<1000 files): 100-500
-  - Medium repos (1000-10000 files): 50-200
-  - Large repos (>10000 files): 20-100
-• Higher maxMatches increase memory usage and response size
-• Performance impact: Parsing all matches still occurs; truncation only affects data transfer
+3. "Invalid pattern: Use named multi-node metavariables like $$BODY instead of bare $$"
+   → Replace "$$$" with "$$$NAME"
+   → All multi-node metavariables must have names
 
-OUTPUT FORMAT:
-• matches: Array of match objects with file, line, column, text, and context
-• skippedLines: Top-level count of any malformed output lines that were skipped during parsing
-• summary: Statistics object with totalMatches, truncated, skippedLines, executionTime
-• skippedLines is available both at top-level and in summary for consistency
+4. Timeout errors
+   → Increase timeoutMs (default: 30000ms)
+   → Narrow paths to specific directories
+   → Specify language for faster parsing
+   → Recommended by repo size:
+     Small (<1K files): 30000ms (default)
+     Medium (1K-10K files): 60000-120000ms
+     Large (>10K files): 120000-300000ms (max: 300000ms)
 
-MCP→CLI PARAMETER MAPPING:
-This tool maps MCP parameters to ast-grep CLI flags as follows:
-• pattern → --pattern <value>
-• language → --lang <value>
-• code → --stdin (with stdin input)
-• paths → positional arguments (file/directory paths)
-• context → --context <number>
-• maxMatches → result slicing (not a CLI flag)
-• timeoutMs → process timeout (not a CLI flag)
-• Output format: --json=stream
+5. Empty results (no error, but matches array is empty)
+   → Pattern is valid but nothing matched (not an error)
+   → Try broader pattern or check pattern syntax matches language AST
+   → Verify paths contain files of specified language
 
-Example CLI equivalent:
-  MCP: { pattern: "console.log($ARG)", paths: ["src/"], language: "js", context: 2 }
-  CLI: ast-grep run --pattern "console.log($ARG)" --lang js --context 2 --json=stream src/
+6. summary.truncated: true
+   → Increase maxMatches parameter (default: 100, max: 10000)
+   → Or narrow search scope to reduce matches
+   → summary.totalMatches shows complete count even when truncated
 
-TIMEOUT GUIDANCE:
-• Default timeout: 30000ms (30 seconds)
-• Timeouts include file parsing, pattern matching, and I/O operations
-• Recommended timeouts by repo size:
-  - Small repos (<1000 files): 30000ms (default)
-  - Medium repos (1000-10000 files): 60000-120000ms
-  - Large repos (>10000 files): 120000-300000ms
-• If timeouts occur: narrow paths, specify language, or use more specific patterns
-• Maximum allowed: 300000ms (5 minutes)
+LIMITATIONS:
+• Paths must be within workspace root (security constraint)
+• Pattern syntax is language-specific
+• Metavariables must be complete AST nodes
+• Multi-node metavariables must be named
+• High skippedLines in output indicates ast-grep format changes (report issue)
 
-PERFORMANCE TIPS:
-• Specify language when known (faster parsing)
-• Use specific paths instead of searching entire workspace
-• Set appropriate maxMatches to limit results
-• Increase timeout for large codebases`,
+OPERATION MODES:
+
+File/Directory Mode (default):
+• Specify paths or omit for current directory
+• Language optional but recommended for performance
+• Example: { pattern: "console.log($$$ARGS)", paths: ["src/"], language: "javascript" }
+
+Inline Code Mode:
+• Use code parameter for testing patterns on snippets
+• Language REQUIRED (throws ValidationError if omitted)
+• Example: { pattern: "console.log($ARG)", code: "console.log('test');", language: "javascript" }
+
+OUTPUT STRUCTURE:
+• matches: Array of { file, line, column, text, context: { before: [], after: [] } }
+• summary: { totalMatches, truncated, skippedLines, executionTime }
+• skippedLines: Count of malformed output lines (should be 0)
+
+PERFORMANCE:
+• Specify language for faster parsing
+• Use specific paths vs entire workspace
+• Adjust maxMatches by repo size:
+  Small (<1K files): 100-500
+  Medium (1K-10K): 50-200
+  Large (>10K): 20-100
+
+REFERENCE - MCP to ast-grep CLI Mapping:
+pattern → --pattern <value>
+language → --lang <value>
+code → --stdin (with stdin input)
+paths → positional arguments
+context → --context <number>
+maxMatches → result slicing (not a CLI flag)
+timeoutMs → process timeout (not a CLI flag)
+
+Example: { pattern: "console.log($ARG)", paths: ["src/"], language: "js", context: 2 }
+CLI: ast-grep run --pattern "console.log($ARG)" --lang js --context 2 --json=stream src/`,
 
       inputSchema: {
         type: 'object',
         properties: {
           pattern: {
             type: 'string',
-            description: 'AST pattern to search for. Use $VAR for single nodes, $$$NAME for multiple nodes. Examples: "console.log($ARG)", "function $NAME($$$PARAMS) { $$$BODY }", "class $NAME { $$$MEMBERS }"'
+            description: 'AST pattern with metavariables ($VAR, $$$NAME, $_). Must be valid syntax for target language.'
           },
           code: {
             type: 'string',
-            description: 'Search inline code directly (requires language parameter). Recommended for testing patterns before applying to codebase.'
+            description: 'Inline code to search. Requires language parameter. Use for testing patterns.'
           },
           paths: {
             type: 'array',
             items: { type: 'string' },
-            description: 'File or directory paths to search. Defaults to current directory. Examples: ["src/index.js"], ["src/", "tests/"]'
+            description: 'File/directory paths within workspace. Omit to search entire workspace. Security validated.'
           },
           language: {
             type: 'string',
-            description: 'Programming language (required for inline code). Supported: javascript/js, typescript/ts, python/py, java, rust, go, cpp, etc.'
+            description: 'Programming language (js/ts/py/java/rust/go/cpp). Required for inline code, recommended for paths.'
           },
           context: {
             type: 'number',
-            default: 3,
-            description: 'Number of lines to show before and after each match (0-100)'
+            description: 'Context lines around matches (0-100). Default: 3. Higher values increase output size.'
           },
           maxMatches: {
             type: 'number',
-            default: 100,
-            description: 'Maximum number of matches to return (1-10000)'
+            description: 'Maximum matches to return (1-10000). Default: 100. Check summary.truncated if limited.'
           },
           timeoutMs: {
             type: 'number',
-            default: 30000,
-            description: 'Search timeout in milliseconds (1000-300000)'
+            description: 'Timeout in milliseconds (1000-300000). Default: 30000. Increase for large repos.'
           }
         },
         required: ['pattern'],

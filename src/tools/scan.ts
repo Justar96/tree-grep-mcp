@@ -5,6 +5,8 @@ import { AstGrepBinaryManager } from '../core/binary-manager.js';
 import { WorkspaceManager } from '../core/workspace-manager.js';
 import { ValidationError, ExecutionError } from '../types/errors.js';
 import { PatternValidator, YamlValidator, ParameterValidator, PathValidator } from '../utils/validation.js';
+import type { Rule, Pattern } from '../types/rules.js';
+import { hasPositiveKey } from '../types/rules.js';
 
 /**
  * Rule builder that generates YAML and runs ast-grep scan
@@ -23,8 +25,25 @@ export class ScanTool {
     if (!params.language || typeof params.language !== 'string') {
       throw new ValidationError('language is required and must be a string');
     }
-    if (!params.pattern || typeof params.pattern !== 'string') {
-      throw new ValidationError('pattern is required and must be a string');
+
+    // Support two modes:
+    // Mode 1 (existing): Simple pattern string + optional where constraints
+    // Mode 2 (new): Complex rule object with kind, has, inside, all, any, not, matches, etc.
+    const hasPattern = params.pattern && typeof params.pattern === 'string';
+    const hasRule = params.rule && typeof params.rule === 'object' && !Array.isArray(params.rule);
+
+    if (!hasPattern && !hasRule) {
+      throw new ValidationError(
+        'Either pattern (string) or rule (object) is required. ' +
+        'Use pattern for simple matching, or rule for structural rules with kind, has, inside, etc.'
+      );
+    }
+
+    if (hasPattern && hasRule) {
+      throw new ValidationError(
+        'Cannot specify both pattern and rule parameters. ' +
+        'Use pattern for simple matching, or rule for structural rules.'
+      );
     }
 
     // Validate rule ID format
@@ -36,13 +55,80 @@ export class ScanTool {
       );
     }
 
-    // Validate pattern
-    const patternValidation = PatternValidator.validatePattern(params.pattern, params.language);
-    if (!patternValidation.valid) {
-      throw new ValidationError(
-        `Invalid pattern: ${patternValidation.errors.join('; ')}`,
-        { errors: patternValidation.errors }
-      );
+    // Validate pattern (only in simple pattern mode)
+    if (hasPattern) {
+      const patternValidation = PatternValidator.validatePattern(params.pattern, params.language);
+      if (!patternValidation.valid) {
+        throw new ValidationError(
+          `Invalid pattern: ${patternValidation.errors.join('; ')}`,
+          { errors: patternValidation.errors }
+        );
+      }
+
+      // Log pattern warnings if any - log each warning individually for better test assertions
+      if (patternValidation.warnings && patternValidation.warnings.length > 0) {
+        for (const warning of patternValidation.warnings) {
+          console.error(`Warning: ${warning}`);
+        }
+      }
+    }
+
+    // Validate rule object (in structural rule mode)
+    if (hasRule) {
+      // Basic validation: rule must have at least one positive key
+      if (!hasPositiveKey(params.rule)) {
+        throw new ValidationError(
+          'Rule object must have at least one positive key (pattern, kind, regex, inside, has, precedes, follows, all, any, or matches)'
+        );
+      }
+
+      // If rule has a pattern property, validate it
+      if (params.rule.pattern) {
+        const pattern = params.rule.pattern;
+        if (typeof pattern === 'string') {
+          const patternValidation = PatternValidator.validatePattern(pattern, params.language);
+          if (!patternValidation.valid) {
+            throw new ValidationError(
+              `Invalid pattern in rule: ${patternValidation.errors.join('; ')}`,
+              { errors: patternValidation.errors }
+            );
+          }
+          // Log warnings for rule pattern
+          if (patternValidation.warnings && patternValidation.warnings.length > 0) {
+            for (const warning of patternValidation.warnings) {
+              console.error(`Warning: ${warning}`);
+            }
+          }
+        } else if (typeof pattern === 'object' && pattern !== null) {
+          // Pattern object validation (selector, context, strictness)
+          if (pattern.selector && typeof pattern.selector !== 'string') {
+            throw new ValidationError('Pattern object selector must be a string');
+          }
+          if (pattern.context && typeof pattern.context !== 'string') {
+            throw new ValidationError('Pattern object context must be a string');
+          }
+          if (pattern.strictness) {
+            const validStrictness = ['cst', 'smart', 'ast', 'relaxed', 'signature'];
+            if (!validStrictness.includes(pattern.strictness)) {
+              throw new ValidationError(
+                `Invalid strictness: ${pattern.strictness}. Must be one of: ${validStrictness.join(', ')}`
+              );
+            }
+          }
+        } else {
+          throw new ValidationError('Rule pattern must be a string or pattern object');
+        }
+      }
+
+      // Validate kind if present
+      if (params.rule.kind && typeof params.rule.kind !== 'string') {
+        throw new ValidationError('Rule kind must be a string (tree-sitter node type)');
+      }
+
+      // Validate regex if present
+      if (params.rule.regex && typeof params.rule.regex !== 'string') {
+        throw new ValidationError('Rule regex must be a string');
+      }
     }
 
     // Validate severity if provided
@@ -173,17 +259,31 @@ export class ScanTool {
   }
 
   private buildYaml(params: any): string {
-    // Extract metavariables from pattern for validation
-    const patternMetavars = PatternValidator.extractMetavariables(params.pattern);
-
     const lines = [
       `id: ${params.id}`,
       `message: ${YamlValidator.escapeYamlString(params.message || params.id)}`,
       `severity: ${params.severity || 'warning'}`,
       `language: ${params.language}`,
-      'rule:',
-      `  pattern: ${YamlValidator.escapeYamlString(params.pattern)}`
+      'rule:'
     ];
+
+    // Mode 1: Simple pattern string
+    let patternMetavars: Set<string> = new Set();
+    if (params.pattern) {
+      patternMetavars = PatternValidator.extractMetavariables(params.pattern);
+      lines.push(`  pattern: ${YamlValidator.escapeYamlString(params.pattern)}`);
+    }
+    // Mode 2: Structural rule object
+    else if (params.rule) {
+      const ruleLines = this.serializeRule(params.rule, 1);
+      lines.push(...ruleLines);
+
+      // Extract metavariables from rule for constraint/fix validation
+      // This is a simplified extraction - only from top-level pattern
+      if (params.rule.pattern && typeof params.rule.pattern === 'string') {
+        patternMetavars = PatternValidator.extractMetavariables(params.rule.pattern);
+      }
+    }
 
     // Add simple constraints if provided
     if (params.where && params.where.length > 0) {
@@ -236,6 +336,120 @@ export class ScanTool {
     return lines.join('\n');
   }
 
+  /**
+   * Serialize a rule object to YAML format with proper indentation
+   *
+   * @param rule - The rule object to serialize (can contain nested rules)
+   * @param indentLevel - Current indentation level (0 = top level, 1 = inside rule:, etc.)
+   * @returns Array of YAML lines with proper indentation
+   */
+  private serializeRule(rule: Rule, indentLevel: number): string[] {
+    const lines: string[] = [];
+    const indent = '  '.repeat(indentLevel);
+
+    // Atomic rules
+    if (rule.pattern !== undefined) {
+      const pattern = rule.pattern;
+      if (typeof pattern === 'string') {
+        lines.push(`${indent}pattern: ${YamlValidator.escapeYamlString(pattern)}`);
+      } else if (typeof pattern === 'object' && pattern !== null) {
+        // Pattern object with selector, context, strictness
+        lines.push(`${indent}pattern:`);
+        if (pattern.selector) {
+          lines.push(`${indent}  selector: ${YamlValidator.escapeYamlString(pattern.selector)}`);
+        }
+        if (pattern.context) {
+          lines.push(`${indent}  context: ${YamlValidator.escapeYamlString(pattern.context)}`);
+        }
+        if (pattern.strictness) {
+          lines.push(`${indent}  strictness: ${pattern.strictness}`);
+        }
+      }
+    }
+
+    if (rule.kind !== undefined) {
+      lines.push(`${indent}kind: ${rule.kind}`);
+    }
+
+    if (rule.regex !== undefined) {
+      lines.push(`${indent}regex: ${YamlValidator.escapeYamlString(rule.regex)}`);
+    }
+
+    // Relational rules (inside, has, precedes, follows)
+    const relationalRules: Array<{ key: string; value: any }> = [
+      { key: 'inside', value: rule.inside },
+      { key: 'has', value: rule.has },
+      { key: 'precedes', value: rule.precedes },
+      { key: 'follows', value: rule.follows }
+    ];
+
+    for (const { key, value } of relationalRules) {
+      if (value !== undefined) {
+        lines.push(`${indent}${key}:`);
+
+        // Serialize nested rule
+        const nestedLines = this.serializeRule(value as Rule, indentLevel + 1);
+        lines.push(...nestedLines);
+
+        // Add stopBy and field if present in the relational rule
+        if (typeof value === 'object' && value !== null) {
+          if ((value as any).stopBy !== undefined) {
+            const stopBy = (value as any).stopBy;
+            if (typeof stopBy === 'string') {
+              lines.push(`${indent}  stopBy: ${stopBy}`);
+            } else if (typeof stopBy === 'object') {
+              lines.push(`${indent}  stopBy:`);
+              lines.push(...this.serializeRule(stopBy as Rule, indentLevel + 2));
+            }
+          }
+          if ((value as any).field !== undefined) {
+            lines.push(`${indent}  field: ${(value as any).field}`);
+          }
+        }
+      }
+    }
+
+    // Composite rules (all, any, not, matches)
+    if (rule.all !== undefined && Array.isArray(rule.all)) {
+      lines.push(`${indent}all:`);
+      for (const subRule of rule.all) {
+        lines.push(`${indent}  -`);
+        const subLines = this.serializeRule(subRule as Rule, indentLevel + 2);
+        // Adjust first line to be on same line as dash
+        if (subLines.length > 0) {
+          const firstLine = subLines[0].trim();
+          lines[lines.length - 1] = `${indent}  - ${firstLine}`;
+          lines.push(...subLines.slice(1));
+        }
+      }
+    }
+
+    if (rule.any !== undefined && Array.isArray(rule.any)) {
+      lines.push(`${indent}any:`);
+      for (const subRule of rule.any) {
+        lines.push(`${indent}  -`);
+        const subLines = this.serializeRule(subRule as Rule, indentLevel + 2);
+        if (subLines.length > 0) {
+          const firstLine = subLines[0].trim();
+          lines[lines.length - 1] = `${indent}  - ${firstLine}`;
+          lines.push(...subLines.slice(1));
+        }
+      }
+    }
+
+    if (rule.not !== undefined) {
+      lines.push(`${indent}not:`);
+      const notLines = this.serializeRule(rule.not as Rule, indentLevel + 1);
+      lines.push(...notLines);
+    }
+
+    if (rule.matches !== undefined) {
+      lines.push(`${indent}matches: ${rule.matches}`);
+    }
+
+    return lines;
+  }
+
   private parseFindings(stdout: string): { findings: any[], skippedLines: number } {
     const findings: any[] = [];
     let skippedLines = 0;
@@ -272,280 +486,205 @@ export class ScanTool {
   static getSchema() {
     return {
       name: 'ast_run_rule',
-      description: `Generate and execute ast-grep YAML rules with advanced features.
+      description: `Generate and execute ast-grep YAML rules. Supports simple patterns with constraints, structural rules (kind/has/inside/all/any/not), fix suggestions, and severity levels. Returns generated YAML and scan findings.
 
-WHEN TO USE THIS TOOL:
-• Need constraints on metavariables (filter by name, type, or pattern)
+QUICK START:
+Simple pattern with constraint:
+{ "id": "no-var", "language": "javascript", "pattern": "var $NAME = $VALUE", "where": [{ "metavariable": "NAME", "regex": "^test" }] }
+
+Structural rule with kind:
+{ "id": "match-expr", "language": "rust", "rule": { "kind": "match_expression" } }
+
+Pattern with fix suggestion:
+{ "id": "modernize", "language": "javascript", "pattern": "var $N = $V", "fix": "const $N = $V", "severity": "warning" }
+
+WHEN TO USE:
+• Need constraints on metavariables (filter by name, pattern, exact value)
 • Want to provide automated fix suggestions
 • Need to categorize findings by severity (error/warning/info)
 • Building reusable code quality rules
-• Complex pattern matching that requires multiple conditions
+• Structural matching with kind, has, inside, all, any, not operators
+• Pattern objects with selector/context/strictness for disambiguation
 
-WHEN TO USE ast_search INSTEAD:
-• Simple pattern matching without constraints
-• Quick exploration of codebase
-• Don't need fix suggestions or severity levels
+WHEN NOT TO USE:
+• Simple search without constraints → Use ast_search
+• Want to apply changes immediately → Use ast_replace
+• Quick codebase exploration → Use ast_search
 
-WHEN TO USE ast_replace INSTEAD:
-• Want to apply changes immediately
-• Don't need to categorize or report findings
-• Simple find-and-replace operations
+RULE MODES (Automatic Detection):
+This tool automatically detects rule complexity based on parameters provided:
 
-RULE STRUCTURE:
-This tool generates YAML rules with the following components:
-1. id: Unique identifier for the rule
-2. message: Human-readable description of the issue
-3. severity: error | warning | info
-4. language: Target programming language
-5. pattern: AST pattern to match
-6. constraints (optional): Filter matches based on metavariable content
-7. fix (optional): Suggested replacement code
+1. Simple Pattern Mode: Provide 'pattern' parameter
+   - AST pattern string with optional constraints
+   - Example: { pattern: "console.log($ARG)", where: [{ metavariable: "ARG", regex: ".*" }] }
+
+2. Structural Rule Mode: Provide 'rule' parameter
+   - Complex rule object with kind, relational, or composite operators
+   - Example: { rule: { kind: "function_declaration", has: { pattern: "await $E", stopBy: "end" } } }
+
+NOTE: Provide either 'pattern' OR 'rule', not both
+
+STRUCTURAL RULES:
+Structural rules enable advanced matching beyond simple patterns:
+
+1. Kind Rules - Match by AST node type:
+   { rule: { kind: "match_expression" } }
+   Matches Rust match expressions by tree-sitter node type.
+
+2. Relational Rules - Match based on relationships (inside, has, precedes, follows):
+   { rule: { kind: "function_declaration", has: { pattern: "await $E", stopBy: "end" } } }
+   Matches functions containing await. IMPORTANT: Use stopBy: "end" for relational rules.
+
+3. Pattern Objects - Disambiguate with selector/context/strictness:
+   { rule: { pattern: { selector: "type_parameters", context: "function $F<$T>()" } } }
+   Matches TypeScript generic function type parameters.
+
+4. Composite Rules - Combine conditions (all=AND, any=OR, not=NOT):
+   { rule: { all: [{ kind: "call_expression" }, { pattern: "console.log($M)" }] } }
+   Matches nodes satisfying ALL sub-rules.
 
 METAVARIABLE RULES:
-1. $_ (anonymous) cannot be referenced in constraints or fix templates - use only for matching
-2. $NAME must be used as a complete AST node unit and must be named (not bare $)
-3. All metavariables must correspond to complete, valid AST nodes in the target language
-4. Multi-node $$$NAME must always be named - bare $$$ is rejected
-5. Metavariables used in constraints or fix must exist in the pattern
+• $VAR - Single node, must be complete AST node ($OBJ.$PROP not $VAR.prop)
+• $$$NAME - Multiple nodes, must be named (bare $$$ rejected)
+• $_ - Anonymous match (cannot reference in constraints/fix)
+• All metavariables in constraints/fix must exist in pattern
+• Multi-node metavariables must always be named
 
 CONSTRAINT EXAMPLES:
 
-1. Match specific variable names:
-   {
-     id: "no-test-vars",
-     pattern: "const $NAME = $VALUE",
-     where: [
-       { metavariable: "NAME", regex: "^test" }
-     ]
-   }
-   // Matches: const testVar = 1
-   // Doesn't match: const myVar = 1
+1. Regex pattern matching:
+   where: [{ metavariable: "NAME", regex: "^test" }]
+   Matches: const testVar = 1  |  Doesn't match: const myVar = 1
 
-2. Match specific values:
-   {
-     id: "no-magic-numbers",
-     pattern: "timeout($DURATION)",
-     where: [
-       { metavariable: "DURATION", regex: "^[0-9]+$" }
-     ]
-   }
-   // Matches: timeout(5000)
-   // Doesn't match: timeout(TIMEOUT_CONSTANT)
+2. Exact value matching:
+   where: [{ metavariable: "OBJ", equals: "console" }, { metavariable: "METHOD", equals: "log" }]
+   Matches: console.log(...)  |  Doesn't match: logger.log(...)
 
-3. Exact matching:
-   {
-     id: "no-console-log",
-     pattern: "$OBJ.$METHOD($$$ARGS)",
-     where: [
-       { metavariable: "OBJ", equals: "console" },
-       { metavariable: "METHOD", equals: "log" }
-     ]
-   }
-   // Matches: console.log(...)
-   // Doesn't match: logger.log(...) or console.error(...)
-
-4. Multiple constraints:
-   {
-     id: "deprecated-api",
-     pattern: "$OBJ.$METHOD($$$ARGS)",
-     where: [
-       { metavariable: "OBJ", equals: "oldAPI" },
-       { metavariable: "METHOD", regex: "^(get|set)" }
-     ]
-   }
-   // Matches: oldAPI.getData(...) or oldAPI.setData(...)
+3. Numeric values only:
+   where: [{ metavariable: "DURATION", regex: "^[0-9]+$" }]
+   Matches: timeout(5000)  |  Doesn't match: timeout(CONSTANT)
 
 FIX TEMPLATE EXAMPLES:
 
-1. Simple replacement:
-   {
-     pattern: "console.log($ARG)",
-     fix: "logger.info($ARG)"
-   }
+1. Simple replacement: pattern="console.log($A)" fix="logger.info($A)"
+2. Reordering: pattern="assertEquals($E, $A)" fix="assertEquals($A, $E)"
+3. Adding context: pattern="throw new Error($M)" fix="throw new Error(\`[MODULE] \${$M}\`)"
 
-2. Reordering:
-   {
-     pattern: "assertEquals($EXPECTED, $ACTUAL)",
-     fix: "assertEquals($ACTUAL, $EXPECTED)"
-   }
-
-3. Adding context:
-   {
-     pattern: "throw new Error($MSG)",
-     fix: "throw new Error(\`[\${MODULE}] \${$MSG}\`)"
-   }
-
-SEVERITY GUIDELINES:
-• error: Code that will cause bugs or runtime failures
-• warning: Code that should be changed but won't break (default)
+SEVERITY LEVELS:
+• error: Critical bugs or runtime failures
+• warning: Should be changed but won't break (default)
 • info: Suggestions for improvement, style issues
 
-COMPLETE EXAMPLES:
+ERROR RECOVERY:
 
-1. Enforce const over var:
-   {
-     id: "prefer-const",
-     language: "javascript",
-     pattern: "var $NAME = $VALUE",
-     message: "Use 'const' or 'let' instead of 'var'",
-     severity: "warning",
-     fix: "const $NAME = $VALUE",
-     paths: ["src/"]
-   }
+If rule execution fails, check these common issues:
 
-2. Detect deprecated API with constraints:
-   {
-     id: "no-deprecated-api",
-     language: "typescript",
-     pattern: "$OBJ.$METHOD($$$ARGS)",
-     message: "This API is deprecated, use newAPI instead",
-     severity: "error",
-     where: [
-       { metavariable: "OBJ", equals: "oldAPI" }
-     ],
-     fix: "newAPI.$METHOD($$$ARGS)",
-     code: "oldAPI.getData(); newAPI.getData();"
-   }
+1. "Either pattern (string) or rule (object) is required"
+   → Provide either pattern parameter OR rule parameter, not both
+   → Example (pattern mode): { pattern: "console.log($A)", ... }
+   → Example (rule mode): { rule: { kind: "function_declaration" }, ... }
 
-3. Enforce naming conventions:
-   {
-     id: "constant-naming",
-     language: "javascript",
-     pattern: "const $NAME = $VALUE",
-     message: "Constants should be UPPER_CASE",
-     severity: "info",
-     where: [
-       { metavariable: "NAME", regex: "^[a-z]" }
-     ]
-   }
+2. "Rule object must have at least one positive key"
+   → Rule object needs pattern, kind, regex, inside, has, all, any, or matches
+   → Example: { rule: { kind: "match_expression" } }
 
-OUTPUT FORMAT:
-Returns both the generated YAML rule and scan results:
-• yaml: The generated YAML rule (can be saved for reuse)
-• skippedLines: Top-level count of any malformed output lines that were skipped during parsing
-• scan.findings: Array of matches with file, line, column, message
-• scan.summary: Statistics (total findings, errors, warnings, skippedLines)
+3. "Metavariable $X used in constraint/fix but not in pattern"
+   → All constraint/fix metavariables must be defined in pattern
+   → Fix: Add $X to pattern or remove from constraint/fix
 
-RESULT HANDLING:
-• All findings are returned (no truncation limit like ast_search)
-• summary.totalFindings reports the complete count
-• summary.errors and summary.warnings break down findings by severity
-• summary.skippedLines indicates any malformed output lines that were skipped
-• skippedLines is available both at top-level and in summary for consistency
-• For large result sets, consider narrowing paths or adding more specific constraints
+4. "Invalid pattern: Use named multi-node metavariables like $$ARGS"
+   → Replace "$$$" with "$$$NAME"
+   → Bare $$$ is rejected
 
-PATH VALIDATION:
-• All paths are validated to be within the workspace root (prevents directory escape attacks)
-• Omitting paths parameter defaults to current workspace root directory (".")
-• Paths can be relative (e.g., "src/") or absolute (must be within workspace)
-• Invalid paths (outside workspace, non-existent) will fail with ValidationError
-• Example: paths: ["src/", "tests/"] scans two directories
-• Example: omit paths entirely to scan the entire workspace
+5. "Language required for inline code"
+   → Language is always required parameter (for both inline and file modes)
+   → Example: { id: "r", language: "javascript", pattern: "...", code: "..." }
 
-MODES OF OPERATION:
+6. "Invalid paths"
+   → Use relative paths within workspace
+   → Paths validated against workspace root for security
+   → Omit paths to scan entire workspace
 
-1. Inline Code Mode (for testing):
-   - Use code parameter to test rules on code snippets
-   - **IMPORTANT: Language is REQUIRED (in the rule parameters) when using inline code mode**
-   - Quick validation of rule logic before scanning files
-   - Minimal working example:
-     {
-       id: "no-var",
-       pattern: "var $NAME = $VALUE",
-       language: "javascript",
-       code: "var x = 1; const y = 2;"
-     }
-   - Language is a required parameter for all rules, so inline mode always has language specified
+7. Empty scan.findings array (no matches)
+   → Rule is valid but matched nothing (not an error)
+   → Test with inline code first to verify rule logic
+   → Check pattern syntax matches language AST
 
-2. File/Directory Mode (for scanning):
-   - Use paths parameter or omit for current directory
-   - Language must be specified in rule parameters
-   - Scans actual codebase
-   - Example: {
-       id: "no-var",
-       pattern: "var $NAME = $VALUE",
-       language: "javascript",
-       paths: ["src/", "lib/"]
-     }
+8. Timeout errors
+   → Increase timeoutMs (default: 30000ms, max: 300000ms)
+   → Narrow paths to specific directories
+   → Simplify pattern or constraints
+   → Recommended by repo size:
+     Small (<1K files): 30000ms (default)
+     Medium (1K-10K): 60000-120000ms
+     Large (>10K): 120000-300000ms
 
-JSX/TSX PATTERN MATCHING:
-When creating rules for JSX/TSX code, set language to 'jsx' or 'tsx':
-• Match elements: "<$COMPONENT $$$ATTRS>" or "<$TAG>$$$CHILDREN</$TAG>"
-• Match attribute names: "<div $ATTR={$VALUE}>"
-• Match attribute values: "<Button onClick={$HANDLER}>"
-• Example: { pattern: "<$COMPONENT className={$CLASS}>", language: "jsx" }
-• WARNING: Overly broad patterns like "<$TAG>" can match thousands of elements in large codebases
-• RECOMMENDATION: Use constraints to filter specific component names or attribute values
+OUTPUT STRUCTURE:
+• yaml: Generated YAML rule (can be saved for reuse)
+• scan.findings: Array of { file, line, column, message, severity }
+• scan.summary: { totalFindings, errors, warnings, info }
+• All findings returned (no truncation)
 
-BEST PRACTICES:
-• Start with simple pattern, add constraints incrementally
-• Test with inline code before scanning files
-• Use descriptive rule IDs (kebab-case recommended)
-• Provide clear, actionable messages
-• Test fix templates thoroughly before relying on them
-• Use appropriate severity levels
+OPERATION MODES:
 
-MCP→CLI PARAMETER MAPPING:
-This tool generates a YAML rule file and maps MCP parameters to ast-grep CLI flags:
-• id, language, pattern, severity, message, where, fix → YAML rule file (temp)
-• paths → positional arguments (file/directory paths)
-• code → temp file with appropriate extension
-• timeoutMs → process timeout (not a CLI flag)
-• Output format: --json=stream
+Inline Code Mode (testing):
+• Use code parameter to test rules on snippets
+• Language parameter REQUIRED
+• Example: { id: "r", language: "js", pattern: "var $N = $V", code: "var x = 1;" }
 
-Example CLI equivalent:
-  MCP: { id: "no-var", pattern: "var $N = $V", language: "js", paths: ["src/"] }
-  YAML: Generated temporary rule file with id, pattern, language, etc.
-  CLI: ast-grep scan --rule <temp-rule.yml> --json=stream src/
+File Mode (scanning):
+• Use paths or omit for entire workspace
+• Language parameter REQUIRED
+• Example: { id: "r", language: "js", pattern: "var $N = $V", paths: ["src/"] }
 
-TIMEOUT GUIDANCE:
-• Default timeout: 30000ms (30 seconds)
-• Timeouts include YAML generation, file parsing, rule execution, and I/O operations
-• Recommended timeouts by repo size:
-  - Small repos (<1000 files): 30000ms (default)
-  - Medium repos (1000-10000 files): 60000-120000ms
-  - Large repos (>10000 files): 120000-300000ms
-• If timeouts occur: narrow paths, specify language, or simplify pattern/constraints
-• Maximum allowed: 300000ms (5 minutes)
-
-YAML GENERATION DETAILS:
-• All strings (patterns, messages, regex) are safely double-quoted and escaped
-• Special YAML characters (: [ ] { } # " ' etc.) are automatically escaped
-• Newlines and quotes within strings are handled correctly
-• IMPORTANT: 'equals' constraints are converted to anchored regex (^value$) internally
-• Example: { equals: "console" } becomes regex: "^console$" in YAML
-• This conversion ensures exact matching while using ast-grep's regex constraint system
+JSX/TSX Patterns:
+• Set language to 'jsx' or 'tsx'
+• Element matching: "<$COMPONENT $$$ATTRS>" or "<$TAG>$$$CHILDREN</$TAG>"
+• Attribute matching: "<Button onClick={$HANDLER}>"
+• WARNING: Broad patterns like "<$TAG>" match thousands of elements - add constraints
 
 LIMITATIONS:
-• Constraints only support regex and equals matching
+• Paths must be within workspace root (security constraint)
+• Constraints support regex and equals only
 • Fix templates cannot perform complex transformations
-• YAML generation is simplified (advanced features require manual YAML)
-• Temporary files are created and cleaned up automatically`,
+• Temporary YAML files created and cleaned up automatically
+
+REFERENCE - MCP to ast-grep CLI Mapping:
+id, language, pattern/rule, severity, message, where, fix → YAML file (temp)
+paths → positional arguments
+code → temp file with extension
+timeoutMs → process timeout (not a CLI flag)
+
+Example: { id: "no-var", pattern: "var $N = $V", language: "js", paths: ["src/"] }
+CLI: ast-grep scan --rule <temp-rule.yml> --json=stream src/`,
 
       inputSchema: {
         type: 'object',
         properties: {
           id: {
             type: 'string',
-            description: 'Unique rule identifier in kebab-case (e.g., "no-console-log", "require-const")'
+            description: 'Unique rule identifier in kebab-case. Example: "no-console-log", "prefer-const"'
           },
           language: {
             type: 'string',
-            description: 'Programming language: javascript/js, typescript/ts, python/py, rust, go, java, cpp, etc.'
+            description: 'Programming language (js/ts/py/rust/go/java/cpp). Required for all rules.'
           },
           pattern: {
             type: 'string',
-            description: 'AST pattern with metavariables. Use $VAR for single nodes, $$$NAME for multiple. Examples: "console.log($ARG)", "function $NAME($$$PARAMS) { $$$BODY }"'
+            description: 'Simple AST pattern string. Use either pattern OR rule, not both.'
+          },
+          rule: {
+            type: 'object',
+            description: 'Structural rule object (kind/has/inside/all/any/not). Use either pattern OR rule, not both.'
           },
           message: {
             type: 'string',
-            description: 'Human-readable message describing the issue (defaults to rule id)'
+            description: 'Human-readable issue description. Defaults to rule ID if omitted.'
           },
           severity: {
             type: 'string',
             enum: ['error', 'warning', 'info'],
-            default: 'warning',
-            description: 'Issue severity: error (critical), warning (default), or info (informational)'
+            description: 'Finding severity. error=critical, warning=default, info=suggestion.'
           },
           where: {
             type: 'array',
@@ -558,7 +697,7 @@ LIMITATIONS:
                 },
                 regex: {
                   type: 'string',
-                  description: 'Regular expression to match metavariable content'
+                  description: 'Regex pattern to match metavariable content'
                 },
                 equals: {
                   type: 'string',
@@ -567,28 +706,28 @@ LIMITATIONS:
               },
               required: ['metavariable']
             },
-            description: 'Constraints to filter matches. Each constraint must reference a metavariable from the pattern.'
+            description: 'Constraints on pattern metavariables. Each must reference a metavariable from pattern.'
           },
           fix: {
             type: 'string',
-            description: 'Fix template using same metavariables as pattern. Example: "logger.info($ARG)" for console.log($ARG) pattern'
+            description: 'Fix template using pattern metavariables. Can reorder, duplicate, or omit variables.'
           },
           paths: {
             type: 'array',
             items: { type: 'string' },
-            description: 'Paths to scan (defaults to current directory)'
+            description: 'File/directory paths to scan within workspace. Omit for entire workspace.'
           },
           code: {
             type: 'string',
-            description: 'Inline code to scan instead of files (useful for testing rules)'
+            description: 'Inline code to scan. Use for testing rules before file scanning.'
           },
           timeoutMs: {
             type: 'number',
-            default: 30000,
-            description: 'Timeout in milliseconds (1000-300000)'
+            description: 'Timeout in milliseconds (1000-300000). Default: 30000. Increase for large repos.'
           }
         },
-        required: ['id', 'language', 'pattern']
+        required: ['id', 'language'],
+        additionalProperties: false
       }
     };
   }

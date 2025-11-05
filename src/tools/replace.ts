@@ -26,17 +26,29 @@ export class ReplaceTool {
       );
     }
 
+    // Log pattern warnings if any - log each warning individually for better test assertions
+    if (patternValidation.warnings && patternValidation.warnings.length > 0) {
+      for (const warning of patternValidation.warnings) {
+        console.error(`Warning: ${warning}`);
+      }
+    }
+
     // Validate replacement
-    if (!params.replacement || typeof params.replacement !== 'string') {
+    // Note: Empty string is valid (deletes matched pattern)
+    if (params.replacement === undefined || params.replacement === null || typeof params.replacement !== 'string') {
       throw new ValidationError('Replacement is required and must be a string');
     }
 
-    const replacementValidation = PatternValidator.validatePattern(params.replacement, params.language);
-    if (!replacementValidation.valid) {
-      throw new ValidationError(
-        `Invalid replacement: ${replacementValidation.errors.join('; ')}`,
-        { errors: replacementValidation.errors }
-      );
+    // Only validate replacement pattern if non-empty
+    // Empty replacement is valid for pattern deletion
+    if (params.replacement.length > 0) {
+      const replacementValidation = PatternValidator.validatePattern(params.replacement, params.language);
+      if (!replacementValidation.valid) {
+        throw new ValidationError(
+          `Invalid replacement: ${replacementValidation.errors.join('; ')}`,
+          { errors: replacementValidation.errors }
+        );
+      }
     }
 
     // Validate metavariable consistency between pattern and replacement
@@ -56,9 +68,11 @@ export class ReplaceTool {
       ? metavarValidation.warnings
       : undefined;
 
-    // Log warnings if any
+    // Log warnings if any - log each warning individually for better test assertions
     if (warnings) {
-      console.error('Metavariable warnings:', warnings.join('; '));
+      for (const warning of warnings) {
+        console.error(`Warning: ${warning}`);
+      }
     }
 
     // Validate optional parameters with actionable error messages
@@ -180,11 +194,12 @@ export class ReplaceTool {
         currentFile = line.trim();
         changeCount = 0;
         diffContent = line + '\n';
-      } else if (line.includes('│-') || line.includes('│+')) {
-        if (line.includes('│-')) changeCount++;
+      } else if (line.includes('│ -') || line.includes('│ +') || line.includes('│-') || line.includes('│+')) {
+        // Change lines can have format: "3    │ -code" or "   3 │ +code"
+        if (line.includes('│ -') || line.includes('│-')) changeCount++;
         diffContent += line + '\n';
-      } else if (/^\s*\d+\s+\d+│/.test(line)) {
-        // Valid context line with Windows-style line numbers (e.g., "1 1│ code")
+      } else if (/^\s*\d+\s+\d+\s*│/.test(line)) {
+        // Valid context line with line numbers (e.g., "1  1 │ code" or "1  1│ code")
         diffContent += line + '\n';
       } else if (line.trim() === '' || /^\s+$/.test(line) || line.startsWith('@@') ||
                  line.startsWith('diff --git') || line.startsWith('index') ||
@@ -230,34 +245,36 @@ export class ReplaceTool {
   static getSchema() {
     return {
       name: 'ast_replace',
-      description: `Perform structural code replacements using AST pattern matching.
+      description: `Structural code replacement using AST pattern matching. SAFE BY DEFAULT - runs in preview mode (dryRun: true) unless explicitly set to false. Returns diff preview and change statistics.
 
-WARNING: This tool can modify files! Always use dryRun=true (default) first.
+QUICK START:
+Preview replacement on inline code (safe, language REQUIRED):
+{ "pattern": "console.log($ARG)", "replacement": "logger.info($ARG)", "code": "console.log('test');", "language": "javascript" }
 
-WHEN TO USE THIS TOOL:
+Preview replacement on files (safe):
+{ "pattern": "var $NAME = $VALUE", "replacement": "const $NAME = $VALUE", "paths": ["src/"], "dryRun": true }
+
+Apply changes after reviewing preview:
+{ "pattern": "var $NAME = $VALUE", "replacement": "const $NAME = $VALUE", "paths": ["src/"], "dryRun": false }
+
+WHEN TO USE:
 • Automated refactoring (rename functions, change APIs, update patterns)
 • Code modernization (convert old syntax to new syntax)
 • Bulk updates across multiple files
-• Testing replacement patterns before creating formal rules
+• Testing patterns before creating rules with ast_run_rule
 
-WORKFLOW RECOMMENDATION:
-1. Test pattern with ast_search first to see what matches
-2. Run ast_replace with dryRun=true (default) to preview changes
-3. Review the diff output carefully
-4. Run with dryRun=false only after confirming changes are correct
+WHEN NOT TO USE:
+• Simple text replacement → Use sed/ripgrep
+• Need conditional replacements based on metavariable values → Use ast_run_rule with constraints
+• Adding new elements without existing structure → Manual editing required
 
-METAVARIABLE RULES:
-• Pattern and replacement MUST use the same metavariable names
-• $VAR in pattern can be used as $VAR in replacement
-• $$$MULTI in pattern can be used as $$$MULTI in replacement
-• You can reorder, duplicate, or omit metavariables in replacement
-• NEVER use bare $$$ - always name multi-node metavariables
-
-ADDITIONAL METAVARIABLE CONSTRAINTS:
-1. $_ (anonymous) cannot be referenced in replacements - use only for matching in patterns
-2. $NAME must be used as a complete AST node unit and must be named (not bare $)
-3. All metavariables must correspond to complete, valid AST nodes in the target language
-4. Multi-node $$$NAME must always be named - bare $$$ is rejected
+METAVARIABLE CONSISTENCY:
+Pattern and replacement must use consistent metavariable names:
+• $VAR in pattern → reuse $VAR in replacement
+• $$$ARGS in pattern → reuse $$$ARGS in replacement
+• Can reorder, duplicate, or omit metavariables in replacement
+• $_ (anonymous) can appear in pattern but NOT in replacement
+• Multi-node metavariables MUST be named (bare $$$ rejected)
 
 COMMON REPLACEMENT PATTERNS:
 
@@ -277,154 +294,144 @@ COMMON REPLACEMENT PATTERNS:
    Pattern: "function $NAME($$$PARAMS) { $$$BODY }"
    Replacement: "const $NAME = ($$$PARAMS) => { $$$BODY }"
 
-5. Adding/removing arguments:
+5. Adding arguments:
    Pattern: "logger.log($MSG)"
    Replacement: "logger.log('INFO', $MSG)"
 
-6. Wrapping code:
-   Pattern: "$EXPR"
-   Replacement: "await $EXPR"
-   (Note: Be specific with pattern to avoid matching everything!)
-
-7. Reordering:
+6. Reordering:
    Pattern: "compare($A, $B)"
    Replacement: "compare($B, $A)"
 
-PATH VALIDATION:
-• All paths are validated to be within the workspace root (prevents directory escape attacks)
-• Omitting paths parameter defaults to current workspace root directory (".")
-• Paths can be relative (e.g., "src/") or absolute (must be within workspace)
-• Invalid paths (outside workspace, non-existent) will fail with ValidationError
-• Example: paths: ["src/components"] applies changes only to that directory
-• Example: omit paths entirely to apply changes to the entire workspace
+7. Wrapping expressions (be specific to avoid matching everything):
+   Pattern: "fetch($URL)"
+   Replacement: "await fetch($URL)"
 
-MODES OF OPERATION:
+ERROR RECOVERY:
 
-1. Inline Code Mode (RECOMMENDED FOR TESTING):
-   - Use code parameter with language
-   - **IMPORTANT: Language is REQUIRED when using code parameter - the tool will fail with ValidationError if omitted**
-   - Safe way to test replacement patterns
-   - Minimal working example:
-     {
-       pattern: "console.log($ARG)",
-       replacement: "logger.info($ARG)",
-       code: "console.log('test');",
-       language: "javascript"
-     }
-   - Without language parameter: ValidationError: "Language required for inline code"
+If replacement fails, check these common issues:
 
-2. File Mode (FOR ACTUAL CHANGES):
-   - Specify paths or omit for current directory
-   - Language is optional but recommended
-   - ALWAYS test with dryRun=true first
-   - Example: {
-       pattern: "var $NAME = $VALUE",
-       replacement: "const $NAME = $VALUE",
-       paths: ["src/"],
-       language: "javascript",
-       dryRun: false  // Only after reviewing dry-run output!
-     }
+1. "Language required for inline code"
+   → Add language parameter when using code parameter
+   → Example: { pattern: "$P", replacement: "$R", code: "test", language: "javascript" }
+
+2. "Metavariable mismatch: $VAR used in replacement but not in pattern"
+   → Ensure all replacement metavariables are defined in pattern
+   → Example: pattern="foo($A)" replacement="bar($B)" is INVALID
+   → Fix: pattern="foo($A)" replacement="bar($A)"
+
+3. "Invalid pattern/replacement: Use named multi-node metavariables like $$ARGS"
+   → Replace "$$$" with "$$$NAME"
+   → Pattern and replacement must use same names
+
+4. "Invalid paths"
+   → Use relative paths within workspace
+   → Paths validated against workspace root for security
+
+5. Warning: "Metavariable $X in pattern is not used in replacement"
+   → Not an error, but may be unintentional
+   → Pattern captures $X but replacement omits it
+   → Example: pattern="foo($A, $B)" replacement="bar($A)" (drops $B)
+
+6. Timeout errors
+   → Increase timeoutMs (default: 60000ms, max: 300000ms)
+   → Narrow paths to specific directories
+   → Break large replacements into smaller passes
+   → Recommended by repo size:
+     Small (<1K files): 60000ms (default)
+     Medium (1K-10K): 120000-180000ms
+     Large (>10K): 180000-300000ms
+
+7. Empty changes array (no matches)
+   → Pattern is valid but matched nothing (not an error)
+   → Verify pattern syntax matches language AST
+   → Try pattern on inline code first to test
 
 DRY-RUN BEHAVIOR:
-• dryRun=true (DEFAULT): Shows diff preview, no files modified
-• dryRun=false: Applies changes to files immediately
-• Output includes file paths, number of changes, and diff preview
-• Review ALL changes before setting dryRun=false
-
-DIFF PARSING CAVEATS:
-• Diff previews are parsed heuristically and may miscount changes in edge cases
-• Change counts are approximate - verify with raw CLI diff output when precision matters
-• For large-scale replacements, prefer smaller targeted passes to validate changes
-• The parser tracks '│-' markers to estimate change counts
-• Edge cases: Complex diffs with unusual formatting may have inaccurate counts
-• Recommendation: Review the full diff preview text, not just the count
-
-OUTPUT FORMAT:
-• changes: Array of change objects with file, matches, preview, and applied status
-• skippedLines: Top-level count of any unexpected diff lines that were skipped during parsing
-• summary: Statistics object with totalChanges, filesModified, skippedLines, dryRun, warnings
-• skippedLines is available both at top-level and in summary for consistency
-
-COMMON PITFALLS:
-• Forgetting to set language parameter (required for inline code)
-• Using different metavariable names in pattern vs replacement
-• Not testing with dryRun first
-• Overly broad patterns that match unintended code
-• Using bare $$$ instead of named $$$ARGS
-
-ERROR PREVENTION:
-• Tool validates metavariable naming (rejects bare $$$)
-• Workspace path validation prevents escaping project directory
-• Timeout protection for large-scale replacements
-• Diff preview helps catch unintended changes
-
-MCP→CLI PARAMETER MAPPING:
-This tool maps MCP parameters to ast-grep CLI flags as follows:
-• pattern → --pattern <value>
-• replacement → --rewrite <value>
-• language → --lang <value>
-• code → --stdin (with stdin input)
-• paths → positional arguments (file/directory paths)
-• dryRun → if false, adds --update-all flag
-• timeoutMs → process timeout (not a CLI flag)
-
-Example CLI equivalent:
-  MCP: { pattern: "var $N = $V", replacement: "const $N = $V", paths: ["src/"], dryRun: true }
-  CLI: ast-grep run --pattern "var $N = $V" --rewrite "const $N = $V" src/
-  (dry-run is default; add --update-all to apply changes)
-
-TIMEOUT GUIDANCE:
-• Default timeout: 60000ms (60 seconds) - higher than search due to rewriting overhead
-• Timeouts include file parsing, pattern matching, rewriting, and I/O operations
-• Recommended timeouts by repo size:
-  - Small repos (<1000 files): 60000ms (default)
-  - Medium repos (1000-10000 files): 120000-180000ms
-  - Large repos (>10000 files): 180000-300000ms
-• If timeouts occur: narrow paths, specify language, or break into smaller replacement passes
-• Maximum allowed: 300000ms (5 minutes)
+• dryRun: true (DEFAULT) → Shows diff preview, NO files modified, safe to run
+• dryRun: false → Applies changes to files IMMEDIATELY, use after reviewing preview
+• Output includes diff preview (when dryRun=true) or confirmation (when dryRun=false)
+• ALWAYS review dry-run output before setting dryRun=false
 
 LIMITATIONS:
-• Cannot add/remove structural elements (e.g., can't add new function parameters without matching existing ones)
-• Replacement must be valid syntax in target language
+• Replacement must be valid syntax for target language
+• Cannot add structural elements without matching existing ones
 • Complex transformations may require multiple passes
-• Some edge cases may need manual review`,
+• Metavariables must be complete AST nodes ($OBJ.$PROP, not $VAR.prop)
+• Paths must be within workspace root (security constraint)
+
+OPERATION MODES:
+
+Inline Code Mode (for testing):
+• Use code parameter with language (REQUIRED)
+• Safe way to test patterns before applying to files
+• Example: { pattern: "console.log($A)", replacement: "logger.info($A)", code: "console.log('test');", language: "javascript" }
+
+File Mode (for actual changes):
+• Specify paths or omit for entire workspace
+• Language optional but recommended for performance
+• ALWAYS test with dryRun=true first
+• Example: { pattern: "var $N = $V", replacement: "const $N = $V", paths: ["src/"], dryRun: true }
+
+OUTPUT STRUCTURE:
+• changes: Array of { file, matches, preview (if dryRun), applied (if not dryRun) }
+• summary: { totalChanges, filesModified, dryRun, warnings (if any) }
+• Diff preview shows exact line changes when dryRun=true
+• Change counts are estimates - review diff preview for accuracy
+
+PERFORMANCE:
+• Default timeout: 60000ms (higher than search due to rewriting overhead)
+• Specify language for faster parsing
+• Use specific paths vs entire workspace
+• Break large replacements into smaller targeted passes
+
+REFERENCE - MCP to ast-grep CLI Mapping:
+pattern → --pattern <value>
+replacement → --rewrite <value>
+language → --lang <value>
+code → --stdin (with stdin input)
+paths → positional arguments
+dryRun: false → --update-all flag
+dryRun: true (default) → no flag (preview mode)
+timeoutMs → process timeout (not a CLI flag)
+
+Example: { pattern: "var $N = $V", replacement: "const $N = $V", paths: ["src/"], dryRun: true }
+CLI: ast-grep run --pattern "var $N = $V" --rewrite "const $N = $V" src/ (no --update-all = preview)`,
 
       inputSchema: {
         type: 'object',
         properties: {
           pattern: {
             type: 'string',
-            description: 'AST pattern to match. Use $VAR for single nodes, $$$NAME for multiple. Examples: "console.log($ARG)", "var $NAME = $VALUE"'
+            description: 'AST pattern to match. Must use same metavariable names as replacement.'
           },
           replacement: {
             type: 'string',
-            description: 'Replacement template using same metavariables as pattern. Examples: "logger.info($ARG)", "const $NAME = $VALUE"'
+            description: 'Replacement template. Reuses pattern metavariables. Can reorder, duplicate, or omit variables.'
           },
           code: {
             type: 'string',
-            description: 'Apply replacement to inline code (requires language). Recommended for testing before applying to files.'
+            description: 'Inline code to modify. Requires language parameter. Use for testing patterns safely.'
           },
           paths: {
             type: 'array',
             items: { type: 'string' },
-            description: 'File paths to modify (default: current directory). Paths validated for security.'
+            description: 'File/directory paths to modify within workspace. Omit for entire workspace. Security validated.'
           },
           language: {
             type: 'string',
-            description: 'Programming language (required for inline code): javascript/js, typescript/ts, python/py, etc.'
+            description: 'Programming language (js/ts/py/java/rust/go/cpp). Required for inline code, recommended for paths.'
           },
           dryRun: {
             type: 'boolean',
-            default: true,
-            description: 'Preview changes without modifying files (default: true). Set false to apply changes after reviewing preview.'
+            description: 'If true or omitted, preview only (no files modified). If false, apply changes after review.'
           },
           timeoutMs: {
             type: 'number',
-            default: 60000,
-            description: 'Timeout in milliseconds (1000-300000)'
+            description: 'Timeout in milliseconds (1000-300000). Default: 60000. Increase for large repos.'
           }
         },
-        required: ['pattern', 'replacement']
+        required: ['pattern', 'replacement'],
+        additionalProperties: false
       }
     };
   }
