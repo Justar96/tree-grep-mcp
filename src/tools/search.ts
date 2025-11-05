@@ -1,3 +1,4 @@
+import * as path from "path";
 import { AstGrepBinaryManager } from "../core/binary-manager.js";
 import { WorkspaceManager } from "../core/workspace-manager.js";
 import { ValidationError, ExecutionError } from "../types/errors.js";
@@ -217,6 +218,19 @@ export class SearchTool {
     }
   }
 
+  /**
+   * Resolves relative file paths to absolute paths using workspace root.
+   * STDIN and empty strings are returned as-is.
+   */
+  private resolveFilePath(filePath: string): string {
+    // STDIN and empty paths stay as-is
+    if (filePath === "STDIN" || filePath === "") {
+      return filePath;
+    }
+    // Convert relative paths to absolute using workspace root
+    return path.resolve(this.workspaceManager.getWorkspaceRoot(), filePath);
+  }
+
   private parseResults(stdout: string, params: SearchParams): SearchResult {
     const matches: MatchEntry[] = [];
     let skippedLines = 0;
@@ -246,7 +260,7 @@ export class SearchTool {
           context?: { before?: string[]; after?: string[] };
         };
         matches.push({
-          file: match.file || "",
+          file: this.resolveFilePath(match.file || ""),
           line: (match.range?.start?.line || 0) + 1, // Convert to 1-based
           column: match.range?.start?.column || 0,
           text: match.text || "",

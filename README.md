@@ -13,11 +13,16 @@ Add to your MCP settings configuration:
   "mcpServers": {
     "tree-ast-grep": {
       "command": "npx",
-      "args": ["-y", "@cabbages/tree-grep", "--auto-install"]
+      "args": ["-y", "@cabbages/tree-grep", "--auto-install"],
+      "env": {
+        "WORKSPACE_ROOT": "${workspaceFolder}"
+      }
     }
   }
 }
 ```
+
+**Important:** The `WORKSPACE_ROOT` environment variable ensures the server uses your project directory as the base for resolving relative paths. Without it, the server may detect the wrong workspace root and relative paths won't work correctly.
 
 ## Tools
 

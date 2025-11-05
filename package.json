@@ -1,6 +1,6 @@
 {
   "name": "@cabbages/tree-grep",
-  "version": "1.1.1",
+  "version": "1.1.4",
   "description": "Simple, direct ast-grep wrapper for AI coding agents. Zero abstractions, maximum performance.",
   "main": "./build/index.js",
   "bin": {
@@ -85,7 +85,10 @@
         "-y",
         "@cabbages/tree-grep",
         "--auto-install"
-      ]
+      ],
+      "env": {
+        "WORKSPACE_ROOT": "${workspaceFolder}"
+      }
     }
   }
 }

@@ -10,6 +10,7 @@
  */
 
 import { mkdir, mkdtemp, rm } from "fs/promises";
+import { rmSync } from "fs";
 import * as os from "os";
 import * as path from "path";
 
@@ -64,12 +65,24 @@ globalThis.cleanupTempTestDir = async (dir: string): Promise<void> => {
   }
 };
 
-process.on("exit", async () => {
+// Synchronous cleanup for exit event (async handlers won't run)
+process.on("exit", () => {
+  for (const dir of tempDirectories) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // Ignore cleanup failures to avoid masking test results
+    }
+  }
+});
+
+// Async cleanup for beforeExit event (runs before exit event)
+process.on("beforeExit", async () => {
   for (const dir of tempDirectories) {
     try {
       await rm(dir, { recursive: true, force: true });
     } catch {
-      // Ignore cleanup failures
+      // Ignore cleanup failures to avoid masking test results
     }
   }
 });

@@ -1,3 +1,4 @@
+import * as path from "path";
 import { AstGrepBinaryManager } from "../core/binary-manager.js";
 import { WorkspaceManager } from "../core/workspace-manager.js";
 import { ValidationError, ExecutionError } from "../types/errors.js";
@@ -232,6 +233,19 @@ export class ReplaceTool {
     }
   }
 
+  /**
+   * Resolves relative file paths to absolute paths using workspace root.
+   * STDIN and empty strings are returned as-is.
+   */
+  private resolveFilePath(filePath: string): string {
+    // STDIN and empty paths stay as-is
+    if (filePath === "STDIN" || filePath === "") {
+      return filePath;
+    }
+    // Convert relative paths to absolute using workspace root
+    return path.resolve(this.workspaceManager.getWorkspaceRoot(), filePath);
+  }
+
   private parseResults(stdout: string, params: ReplaceParams, warnings?: string[]): ReplaceResult {
     const changes: ChangeEntry[] = [];
 
@@ -261,7 +275,7 @@ export class ReplaceTool {
         // Looks like a file header
         if (currentFile && changeCount > 0) {
           changes.push({
-            file: currentFile,
+            file: this.resolveFilePath(currentFile),
             matches: changeCount,
             preview: params.dryRun !== false ? diffContent : undefined,
             applied: params.dryRun === false,
@@ -304,7 +318,7 @@ export class ReplaceTool {
     // Don't forget the last file
     if (currentFile && (changeCount > 0 || diffContent.trim())) {
       changes.push({
-        file: currentFile,
+        file: this.resolveFilePath(currentFile),
         matches: Math.max(changeCount, 1),
         preview: params.dryRun !== false ? diffContent : undefined,
         applied: params.dryRun === false,

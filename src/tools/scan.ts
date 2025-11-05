@@ -74,16 +74,93 @@ export class ScanTool {
   ) {}
 
   async execute(paramsRaw: Record<string, unknown>): Promise<ScanResult> {
-    // Runtime parameter validation with type narrowing
-    const params = paramsRaw as unknown as ScanParams;
-
+    // Runtime parameter validation with explicit type checking for all fields
     // Validate required parameters
-    if (!params.id || typeof params.id !== "string") {
+    if (!paramsRaw.id || typeof paramsRaw.id !== "string") {
       throw new ValidationError("id is required and must be a string");
     }
-    if (!params.language || typeof params.language !== "string") {
+    if (!paramsRaw.language || typeof paramsRaw.language !== "string") {
       throw new ValidationError("language is required and must be a string");
     }
+
+    // Validate optional parameters with explicit type checks
+    if (paramsRaw.pattern !== undefined && typeof paramsRaw.pattern !== "string") {
+      throw new ValidationError("pattern must be a string");
+    }
+    if (
+      paramsRaw.rule !== undefined &&
+      (typeof paramsRaw.rule !== "object" || paramsRaw.rule === null || Array.isArray(paramsRaw.rule))
+    ) {
+      throw new ValidationError("rule must be an object");
+    }
+    if (paramsRaw.message !== undefined && typeof paramsRaw.message !== "string") {
+      throw new ValidationError("message must be a string");
+    }
+    if (
+      paramsRaw.severity !== undefined &&
+      (typeof paramsRaw.severity !== "string" ||
+        !["error", "warning", "info"].includes(paramsRaw.severity))
+    ) {
+      throw new ValidationError('severity must be one of: "error", "warning", "info"');
+    }
+    if (paramsRaw.fix !== undefined && typeof paramsRaw.fix !== "string") {
+      throw new ValidationError("fix must be a string");
+    }
+    if (paramsRaw.code !== undefined && typeof paramsRaw.code !== "string") {
+      throw new ValidationError("code must be a string");
+    }
+    if (paramsRaw.timeoutMs !== undefined && typeof paramsRaw.timeoutMs !== "number") {
+      throw new ValidationError("timeoutMs must be a number");
+    }
+
+    // Validate paths array
+    if (paramsRaw.paths !== undefined) {
+      if (!Array.isArray(paramsRaw.paths)) {
+        throw new ValidationError("paths must be an array");
+      }
+      for (let i = 0; i < paramsRaw.paths.length; i++) {
+        if (typeof paramsRaw.paths[i] !== "string") {
+          throw new ValidationError(`paths[${i}] must be a string`);
+        }
+      }
+    }
+
+    // Validate where array
+    if (paramsRaw.where !== undefined) {
+      if (!Array.isArray(paramsRaw.where)) {
+        throw new ValidationError("where must be an array");
+      }
+      for (let i = 0; i < paramsRaw.where.length; i++) {
+        const constraint = paramsRaw.where[i];
+        if (typeof constraint !== "object" || constraint === null || Array.isArray(constraint)) {
+          throw new ValidationError(`where[${i}] must be an object`);
+        }
+        if (typeof constraint.metavariable !== "string") {
+          throw new ValidationError(`where[${i}].metavariable is required and must be a string`);
+        }
+        if (constraint.regex !== undefined && typeof constraint.regex !== "string") {
+          throw new ValidationError(`where[${i}].regex must be a string`);
+        }
+        if (constraint.equals !== undefined && typeof constraint.equals !== "string") {
+          throw new ValidationError(`where[${i}].equals must be a string`);
+        }
+      }
+    }
+
+    // After validation, safely cast to ScanParams
+    const params: ScanParams = {
+      id: paramsRaw.id,
+      language: paramsRaw.language,
+      pattern: paramsRaw.pattern as string | undefined,
+      rule: paramsRaw.rule as Record<string, unknown> | undefined,
+      message: paramsRaw.message as string | undefined,
+      severity: paramsRaw.severity as "error" | "warning" | "info" | undefined,
+      fix: paramsRaw.fix as string | undefined,
+      code: paramsRaw.code as string | undefined,
+      timeoutMs: paramsRaw.timeoutMs as number | undefined,
+      paths: paramsRaw.paths as string[] | undefined,
+      where: paramsRaw.where as WhereConstraint[] | undefined,
+    };
 
     // Support two modes:
     // Mode 1 (existing): Simple pattern string + optional where constraints
@@ -559,6 +636,19 @@ export class ScanTool {
     return lines;
   }
 
+  /**
+   * Resolves relative file paths to absolute paths using workspace root.
+   * STDIN and empty strings are returned as-is.
+   */
+  private resolveFilePath(filePath: string): string {
+    // STDIN and empty paths stay as-is
+    if (filePath === "STDIN" || filePath === "") {
+      return filePath;
+    }
+    // Convert relative paths to absolute using workspace root
+    return path.resolve(this.workspaceManager.getWorkspaceRoot(), filePath);
+  }
+
   private parseFindings(stdout: string): { findings: Finding[]; skippedLines: number } {
     const findings: Finding[] = [];
     let skippedLines = 0;
@@ -582,15 +672,16 @@ export class ScanTool {
         };
         const startLine = (finding.range?.start?.line || 0) + 1;
         const startColumn = finding.range?.start?.column || 0;
+        const resolvedFile = this.resolveFilePath(finding.file || "");
         findings.push({
           ruleId: finding.ruleId || "unknown",
           severity: finding.severity || "info",
           message: finding.message || "",
-          file: finding.file || "",
+          file: resolvedFile,
           line: startLine,
           column: startColumn,
           range: {
-            file: finding.file || "",
+            file: resolvedFile,
             start: {
               line: startLine,
               column: startColumn,

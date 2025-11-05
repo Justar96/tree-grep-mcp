@@ -40,7 +40,7 @@ jobs:
 
       - name: Install ast-grep binary
         run: |
-          curl -fsSL https://github.com/ast-grep/ast-grep/releases/download/0.39.5/app-x86_64-unknown-linux-gnu.zip -o ast-grep.zip
+          curl -fsSL https://github.com/ast-grep/ast-grep/releases/download/0.39.7/app-x86_64-unknown-linux-gnu.zip -o ast-grep.zip
           unzip ast-grep.zip
           sudo mv ast-grep /usr/local/bin/
           chmod +x /usr/local/bin/ast-grep
