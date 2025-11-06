@@ -200,6 +200,15 @@ export class WorkspaceManager {
 
   validatePath(inputPath: string): { valid: boolean; resolvedPath: string; error?: string } {
     try {
+      // Step 1: Check if path is absolute - reject relative paths immediately
+      if (!PathValidator.isAbsolutePath(inputPath)) {
+        return {
+          valid: false,
+          resolvedPath: inputPath,
+          error: `Path must be absolute: "${inputPath}". Relative paths are not supported. Use absolute paths like "/workspace/src/" or "C:/workspace/src/"`,
+        };
+      }
+
       // Check for Windows absolute paths on non-Windows platforms
       if (PathValidator.isWindowsAbsolutePath(inputPath) && process.platform !== "win32") {
         return {
@@ -212,51 +221,52 @@ export class WorkspaceManager {
       // Normalize Windows paths to forward slashes for ast-grep compatibility
       const normalizedInput = PathValidator.normalizePath(inputPath);
 
-      // Resolve the path relative to workspace root (using native separators for validation)
-      const resolvedPath = path.resolve(this.config.root, normalizedInput);
-      const normalizedRoot = path.resolve(this.config.root);
-      const relativeFromRoot = path.relative(normalizedRoot, resolvedPath);
+      // Step 2 & 3: Simplified path validation without resolution
+      // Since paths are absolute, validate workspace boundaries directly
+      const normalizedRoot = PathValidator.normalizePath(path.resolve(this.config.root));
+      const relativeFromRoot = path.relative(normalizedRoot, normalizedInput);
 
-      // Ensure the resolved path is within the workspace root
+      // Ensure the path is within the workspace root
       if (relativeFromRoot === "" || relativeFromRoot === ".") {
-        // resolvedPath is the root itself; allow
+        // Path is the root itself; allow
       } else if (relativeFromRoot.startsWith(".." + path.sep) || relativeFromRoot === "..") {
         return {
           valid: false,
-          resolvedPath: PathValidator.normalizePath(resolvedPath),
+          resolvedPath: normalizedInput,
           error: `Path "${inputPath}" is outside workspace root`,
         };
       }
 
+      // Step 4: Security checks remain unchanged
       // Check against blocked paths
       for (const blockedPath of this.config.blockedPaths) {
-        if (resolvedPath.startsWith(blockedPath)) {
+        if (normalizedInput.startsWith(PathValidator.normalizePath(blockedPath))) {
           return {
             valid: false,
-            resolvedPath: PathValidator.normalizePath(resolvedPath),
+            resolvedPath: normalizedInput,
             error: `Access to system directory "${inputPath}" is blocked`,
           };
         }
       }
 
       // Check depth limit
-      const relativePath = relativeFromRoot;
-      const depth = relativePath.split(path.sep).length;
+      const depth = relativeFromRoot.split(path.sep).length;
 
       if (depth > this.config.maxDepth) {
         return {
           valid: false,
-          resolvedPath: PathValidator.normalizePath(resolvedPath),
+          resolvedPath: normalizedInput,
           error: `Path depth (${depth}) exceeds maximum allowed depth (${this.config.maxDepth})`,
         };
       }
 
-      // Return normalized path for ast-grep compatibility
+      // Step 5: Return normalized absolute path (already normalized at line 220)
       return {
         valid: true,
-        resolvedPath: PathValidator.normalizePath(resolvedPath),
+        resolvedPath: normalizedInput,
       };
     } catch (error) {
+      // Step 6: Error handling
       const errorMessage = error instanceof Error ? error.message : String(error);
       return {
         valid: false,

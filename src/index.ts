@@ -61,7 +61,7 @@ CONFIGURATION:
 
 ENVIRONMENT VARIABLES:
   AST_GREP_BINARY_PATH     Path to custom ast-grep binary
-  AST_GREP_CACHE_DIR       Cache directory for downloaded binaries
+  AST_GREP_CACHE_DIR       Cache directory for downloaded binaries (recommended: use absolute path)
   WORKSPACE_ROOT           Explicit workspace root directory
 
 EXAMPLES:
@@ -74,16 +74,23 @@ EXAMPLES:
   # Auto-install (recommended)
   npx -y tree-ast-grep-mcp --auto-install
 
-MCP CONFIGURATION:
-  Add to your MCP settings:
+MCP CONFIGURATION (Recommended for Claude Desktop):
+  Add to your MCP settings with absolute cache path:
   {
     "mcpServers": {
       "tree-ast-grep": {
         "command": "npx",
-        "args": ["-y", "@cabbages/tree-ast-grep-mcp", "--auto-install"]
+        "args": ["-y", "@cabbages/tree-ast-grep-mcp", "--auto-install"],
+        "env": {
+          "WORKSPACE_ROOT": "\${workspaceFolder}",
+          "AST_GREP_CACHE_DIR": "C:\\\\Users\\\\YourUsername\\\\.ast-grep-mcp\\\\binaries"
+        }
       }
     }
   }
+
+  Note: Replace YourUsername with your actual username.
+  macOS/Linux: use /Users/YourUsername/.ast-grep-mcp/binaries
 `);
 }
 

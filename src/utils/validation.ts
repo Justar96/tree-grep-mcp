@@ -1,3 +1,5 @@
+import * as path from "path";
+
 /**
  * Validation result interface
  */
@@ -574,6 +576,50 @@ export class PathValidator {
    */
   static isWindowsAbsolutePath(inputPath: string): boolean {
     return /^[a-zA-Z]:[/\\]/.test(inputPath);
+  }
+
+  /**
+   * Detect if a path is absolute across all platforms.
+   *
+   * This method validates absolute paths for:
+   * - Unix/Linux/macOS: Paths starting with `/` (e.g., `/home/user/project`)
+   * - Windows: Paths with drive letters (e.g., `C:/Users/project` or `C:\Users\project`)
+   * - Windows UNC: Network paths (e.g., `//server/share` or `\\server\share`)
+   *
+   * Edge cases handled:
+   * - Empty strings return false
+   * - Relative paths like `.` and `..` return false
+   *
+   * @param inputPath - The path to check
+   * @returns true if the path is absolute on any platform, false otherwise
+   *
+   * @example
+   * isAbsolutePath('/home/user/project')     // true (Unix)
+   * isAbsolutePath('C:/Users/project')       // true (Windows)
+   * isAbsolutePath('//server/share')         // true (UNC)
+   * isAbsolutePath('./relative/path')        // false
+   * isAbsolutePath('')                       // false
+   */
+  static isAbsolutePath(inputPath: string): boolean {
+    // Handle edge cases
+    if (!inputPath || inputPath === "" || inputPath === "." || inputPath === "..") {
+      return false;
+    }
+
+    // Use Node.js built-in for primary check
+    // This handles Unix absolute paths and Windows drive letters correctly
+    const isAbsolute = path.isAbsolute(inputPath);
+    if (isAbsolute) {
+      return true;
+    }
+
+    // Additional check for UNC paths (\\server\share or //server/share)
+    // path.isAbsolute() on Windows handles UNC paths, but we check explicitly for cross-platform compatibility
+    if (inputPath.startsWith("//") || inputPath.startsWith("\\\\")) {
+      return true;
+    }
+
+    return false;
   }
 }
 

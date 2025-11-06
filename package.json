@@ -87,7 +87,8 @@
         "--auto-install"
       ],
       "env": {
-        "WORKSPACE_ROOT": "${workspaceFolder}"
+        "WORKSPACE_ROOT": "${workspaceFolder}",
+        "AST_GREP_CACHE_DIR": "C:\\Users\\YourUsername\\.ast-grep-mcp\\binaries"
       }
     }
   }

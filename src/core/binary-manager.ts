@@ -29,6 +29,34 @@ export class AstGrepBinaryManager {
     this.options = options;
   }
 
+  /**
+   * Get the default cache directory with proper path validation.
+   * This method handles cases where os.homedir() may return unexpected values
+   * due to environment variable pollution from workspace configurations.
+   */
+  private getDefaultCacheDir(): string {
+    // On Windows, use USERPROFILE directly to avoid path resolution issues
+    if (process.platform === "win32") {
+      const userProfile = process.env.USERPROFILE;
+      if (userProfile && path.isAbsolute(userProfile)) {
+        return path.join(userProfile, ".ast-grep-mcp", "binaries");
+      }
+    }
+
+    // On Unix-like systems, use HOME or fall back to os.homedir()
+    const home = process.env.HOME || os.homedir();
+    if (home && path.isAbsolute(home)) {
+      return path.join(home, ".ast-grep-mcp", "binaries");
+    }
+
+    // Last resort: use a temp directory
+    const tempDir = os.tmpdir();
+    console.error(
+      `Warning: Could not determine user home directory, using temp directory: ${tempDir}`
+    );
+    return path.join(tempDir, ".ast-grep-mcp", "binaries");
+  }
+
   private async extractBinaryVersion(binaryPath: string): Promise<string | null> {
     try {
       const { command, commandArgs } = this.getExecutionCommand(binaryPath, ["--version"]);
@@ -183,7 +211,7 @@ export class AstGrepBinaryManager {
       return;
     }
 
-    const cacheDir = this.options.cacheDir || path.join(os.homedir(), ".ast-grep-mcp", "binaries");
+    const cacheDir = this.options.cacheDir || this.getDefaultCacheDir();
 
     const binaryName = this.getBinaryName(platform, arch);
     const binaryPath = path.join(cacheDir, binaryName);

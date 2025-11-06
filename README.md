@@ -15,14 +15,19 @@ Add to your MCP settings configuration:
       "command": "npx",
       "args": ["-y", "@cabbages/tree-grep", "--auto-install"],
       "env": {
-        "WORKSPACE_ROOT": "${workspaceFolder}"
+        "WORKSPACE_ROOT": "${workspaceFolder}",
+        "AST_GREP_CACHE_DIR": "C:\\Users\\YourUsername\\.ast-grep-mcp\\binaries"
       }
     }
   }
 }
 ```
 
-**Important:** The `WORKSPACE_ROOT` environment variable ensures the server uses your project directory as the base for resolving relative paths. Without it, the server may detect the wrong workspace root and relative paths won't work correctly.
+**Important Configuration Notes:**
+- `WORKSPACE_ROOT`: Ensures the server uses your project directory as the base for resolving relative paths. Without it, the server may detect the wrong workspace root.
+- `AST_GREP_CACHE_DIR`: **Recommended for Claude Desktop and other AI agent environments.** Use an absolute path to avoid path resolution issues. Replace `C:\\Users\\YourUsername` with your actual user directory.
+  - Windows: `C:\\Users\\YourUsername\\.ast-grep-mcp\\binaries`
+  - macOS/Linux: `/Users/YourUsername/.ast-grep-mcp/binaries` or `/home/username/.ast-grep-mcp/binaries`
 
 ## Tools
 
@@ -195,6 +200,28 @@ All file paths are validated to prevent access outside the workspace:
 - System directories blocked (`/etc`, `/bin`, `C:\Windows`, etc.)
 - Sensitive directories blocked (`.ssh`, `.aws`, etc.)
 - Maximum path depth: 10 levels
+
+## Troubleshooting
+
+### "ast-grep binary not found" error in Claude Desktop
+
+If you see an error like `ast-grep binary not found at C:\Users\username.ast-grep-mcp\binaries\...` (note the missing backslash), this is caused by environment variable conflicts with workspace settings.
+
+**Solution:** Set an explicit cache directory using an absolute path in your MCP configuration:
+
+```json
+{
+  "mcpServers": {
+    "tree-ast-grep": {
+      "env": {
+        "AST_GREP_CACHE_DIR": "C:\\Users\\YourUsername\\.ast-grep-mcp\\binaries"
+      }
+    }
+  }
+}
+```
+
+Replace `YourUsername` with your actual Windows username. On macOS/Linux, use `/Users/YourUsername/.ast-grep-mcp/binaries` or `/home/username/.ast-grep-mcp/binaries`.
 
 ## Development
 
