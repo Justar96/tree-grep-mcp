@@ -270,6 +270,41 @@ export class PatternValidator {
   }
 
   /**
+   * Detect if pattern is a simple text search that should use grep instead
+   * @param pattern - The pattern to check
+   * @returns Warning message if pattern is better suited for grep, undefined otherwise
+   */
+  private static detectSimpleTextSearch(pattern: string): string | undefined {
+    // Check if pattern has no metavariables
+    const hasMetavariables = /\$+[A-Z_][A-Z0-9_]*/.test(pattern);
+    
+    // Pattern with only string literals (no code structure)
+    const isOnlyStringLiteral = /^["'`][^"'`]*["'`]$/.test(pattern.trim());
+    if (isOnlyStringLiteral) {
+      return (
+        `Pattern is a string literal without code structure. ` +
+        `Use grep for string searches: grep "${pattern.replace(/["'`]/g, '')}" ` +
+        `ast-grep is for matching code patterns, not string content.`
+      );
+    }
+    
+    // Check if pattern has structural elements (excluding quotes for string detection)
+    const hasStructuralElements = /[(){}\[\]<>]/.test(pattern);
+    
+    // Simple string without metavariables or structure
+    if (!hasMetavariables && !hasStructuralElements) {
+      return (
+        `Pattern "${pattern}" appears to be a simple text search without AST structure. ` +
+        `For plain text searches, use grep/ripgrep instead - they are faster and more appropriate. ` +
+        `ast-grep is designed for structural code patterns with metavariables (e.g., $VAR) or syntax matching. ` +
+        `Use ast-grep only when you need to match code structure, not plain text.`
+      );
+    }
+    
+    return undefined;
+  }
+
+  /**
    * Validate an ast-grep pattern for common issues
    * @param pattern - The pattern to validate
    * @param language - Optional language for language-specific validation
@@ -283,6 +318,12 @@ export class PatternValidator {
     if (!pattern || pattern.trim().length === 0) {
       errors.push("Pattern cannot be empty");
       return { valid: false, errors, warnings };
+    }
+
+    // Detect simple text searches that should use grep instead
+    const textSearchWarning = this.detectSimpleTextSearch(pattern);
+    if (textSearchWarning) {
+      warnings.push(textSearchWarning);
     }
 
     // Detect invalid metavariable placements

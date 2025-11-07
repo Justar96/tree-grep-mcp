@@ -40,7 +40,7 @@ export class WorkspaceManager {
       root: workspaceRoot,
       allowedPaths: [],
       blockedPaths: this.getBlockedPaths(),
-      maxDepth: 10,
+      maxDepth: 6,
     };
   }
 
@@ -53,7 +53,6 @@ export class WorkspaceManager {
     }
 
     let currentDir = process.cwd();
-    console.error(`Starting workspace detection from: ${currentDir}`);
 
     // Enhanced root indicators with priority ordering
     const primaryIndicators = [".git", "package.json", "Cargo.toml", "go.mod", "pom.xml"];
@@ -71,8 +70,8 @@ export class WorkspaceManager {
       for (const indicator of primaryIndicators) {
         try {
           fsSync.accessSync(path.join(currentDir, indicator));
-          if (this.validateWorkspaceRoot(currentDir)) {
-            console.error(`Found primary workspace indicator '${indicator}' in: ${currentDir}`);
+          // Primary indicators are strong signals - validate but don't require code structure
+          if (this.validateWorkspaceRoot(currentDir, true)) {
             return currentDir;
           }
         } catch {
@@ -84,8 +83,8 @@ export class WorkspaceManager {
       for (const indicator of secondaryIndicators) {
         try {
           fsSync.accessSync(path.join(currentDir, indicator));
-          if (this.validateWorkspaceRoot(currentDir)) {
-            console.error(`Found secondary workspace indicator '${indicator}' in: ${currentDir}`);
+          // Secondary indicators are also strong signals
+          if (this.validateWorkspaceRoot(currentDir, true)) {
             return currentDir;
           }
         } catch {
@@ -99,8 +98,8 @@ export class WorkspaceManager {
         for (const indicator of tertiaryIndicators) {
           try {
             fsSync.accessSync(path.join(currentDir, indicator));
-            if (this.validateWorkspaceRoot(currentDir)) {
-              console.error(`Found tertiary workspace indicator '${indicator}' in: ${currentDir}`);
+            // Tertiary indicators require code structure validation
+            if (this.validateWorkspaceRoot(currentDir, false)) {
               return currentDir;
             }
           } catch {
@@ -124,7 +123,6 @@ export class WorkspaceManager {
           try {
             fsSync.accessSync(path.join(candidate, "package.json"));
             fsSync.accessSync(path.join(candidate, "src"));
-            console.error(`Using nested project directory as workspace root: ${candidate}`);
             return candidate;
           } catch {
             // Not a project directory
@@ -133,14 +131,43 @@ export class WorkspaceManager {
       }
     } catch {}
 
-    // Enhanced fallback: use current directory with validation
+    // Fallback with warning: use current directory but require explicit paths
     const fallback = process.cwd();
-    console.error(`No workspace indicators found, using current directory: ${fallback}`);
+    console.error(
+      `WARNING: No workspace root detected. Current directory "${fallback}" lacks project indicators (.git, package.json, etc.). ` +
+        `All operations will require explicit absolute paths. Set WORKSPACE_ROOT environment variable for better workspace detection.`
+    );
     return fallback;
   }
 
-  private validateWorkspaceRoot(rootPath: string): boolean {
+  private validateWorkspaceRoot(rootPath: string, hasStrongIndicator = false): boolean {
     try {
+      // Reject common user home directories
+      const home = process.env.HOME || process.env.USERPROFILE || "";
+      if (home && path.resolve(rootPath) === path.resolve(home)) {
+        return false; // Never use home directory as workspace root
+      }
+
+      // Reject if path contains common user directory names
+      const normalizedPath = rootPath.toLowerCase();
+      const userDirPatterns = [
+        /[/\\]downloads[/\\]?$/i,
+        /[/\\]documents[/\\]?$/i,
+        /[/\\]desktop[/\\]?$/i,
+        /[/\\]pictures[/\\]?$/i,
+        /[/\\]videos[/\\]?$/i,
+        /[/\\]music[/\\]?$/i,
+      ];
+      if (userDirPatterns.some((pattern) => pattern.test(normalizedPath))) {
+        return false;
+      }
+
+      // If we have a strong indicator (like .git or package.json), trust it
+      // and skip the code structure check
+      if (hasStrongIndicator) {
+        return true;
+      }
+
       const entries = fsSync.readdirSync(rootPath);
 
       // Check for presence of source code files or directories
@@ -170,21 +197,41 @@ export class WorkspaceManager {
   }
 
   private getBlockedPaths(): string[] {
+    const home = process.env.HOME || process.env.USERPROFILE || "";
     const systemPaths = [
+      // Unix system directories
       "/etc",
       "/bin",
       "/usr",
       "/sys",
-      "/proc", // Unix system dirs
+      "/proc",
+      // Windows system directories
       "C:\\Windows",
-      "C:\\Program Files", // Windows system dirs
-      path.join(process.env.HOME || "", ".ssh"), // SSH keys
-      path.join(process.env.HOME || "", ".aws"), // AWS credentials
-      "node_modules/.bin", // Binary executables
-      ".git", // Git internal files
+      "C:\\Program Files",
+      "C:\\Program Files (x86)",
+      // Sensitive user directories
+      path.join(home, ".ssh"),
+      path.join(home, ".aws"),
+      path.join(home, ".gnupg"),
+      // Common user directories that shouldn't be scanned
+      path.join(home, "Downloads"),
+      path.join(home, "Documents"),
+      path.join(home, "Desktop"),
+      path.join(home, "Pictures"),
+      path.join(home, "Videos"),
+      path.join(home, "Music"),
+      // Language-specific cache/module directories
+      path.join(home, "go", "pkg"),
+      path.join(home, ".cargo"),
+      path.join(home, ".rustup"),
+      path.join(home, ".npm"),
+      path.join(home, ".cache"),
+      // Build artifacts and dependencies
+      "node_modules/.bin",
+      ".git",
     ];
 
-    return systemPaths.map((p) => path.resolve(p));
+    return systemPaths.map((p) => path.resolve(p)).filter((p) => p !== path.resolve(""));
   }
 
   getConfig(): WorkspaceConfig {

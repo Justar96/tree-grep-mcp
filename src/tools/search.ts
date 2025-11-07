@@ -167,6 +167,35 @@ export class SearchTool {
       const pathsProvided = params.paths && Array.isArray(params.paths) && params.paths.length > 0;
       const inputPaths: string[] = pathsProvided && params.paths ? params.paths : ["."];
 
+      // Warn when scanning entire workspace with default path
+      if (!pathsProvided) {
+        const workspaceRoot = this.workspaceManager.getWorkspaceRoot();
+        const home = process.env.HOME || process.env.USERPROFILE || "";
+        
+        // Prevent scanning from home directory or common user directories
+        if (home && path.resolve(workspaceRoot) === path.resolve(home)) {
+          throw new ValidationError(
+            `Cannot scan from home directory without explicit paths. Please provide absolute paths to specific directories.`
+          );
+        }
+        
+        const normalizedRoot = workspaceRoot.toLowerCase();
+        const userDirPatterns = [
+          /[/\\]downloads[/\\]?$/i,
+          /[/\\]documents[/\\]?$/i,
+          /[/\\]desktop[/\\]?$/i,
+        ];
+        if (userDirPatterns.some((pattern) => pattern.test(normalizedRoot))) {
+          throw new ValidationError(
+            `Cannot scan from user directory without explicit paths. Please provide absolute paths to specific directories.`
+          );
+        }
+        
+        console.error(
+          `Warning: No paths provided, scanning entire workspace from root: ${workspaceRoot}`
+        );
+      }
+
       // Validate that paths are absolute
       // Only allow "." when it's the default (paths not provided by client)
       for (const p of inputPaths) {
@@ -226,6 +255,13 @@ export class SearchTool {
 
       // Pass normalized paths to ast-grep (not absolute resolved paths)
       args.push(...normalizedPaths);
+
+      // Log paths being scanned for debugging
+      if (normalizedPaths.length <= 3) {
+        console.error(`Scanning paths: ${normalizedPaths.join(", ")}`);
+      } else {
+        console.error(`Scanning ${normalizedPaths.length} paths`);
+      }
     }
 
     try {
@@ -341,6 +377,9 @@ WHEN NOT TO USE:
 • Want to provide fix suggestions → Use ast_run_rule with fix parameter
 • Need severity levels or categorization → Use ast_run_rule
 • Text-based search (grep strings) → Use grep/ripgrep tools instead
+• Simple string matching without code structure → Use grep/ripgrep (faster and more appropriate)
+• Control flow analysis (complex if/with/try blocks) → Limited support, may require structural rules
+• Regex-only matching → ast-grep requires AST patterns, use grep with regex instead
 
 PATTERN SYNTAX:
 • $VAR - Single AST node (expression, identifier, statement)
@@ -425,11 +464,24 @@ If search fails, check these common issues:
    → Or narrow search scope to reduce matches
    → summary.totalMatches shows complete count even when truncated
 
+BEST PRACTICES:
+• Use for structural code patterns, not plain text searches
+• Start with simple patterns and add complexity incrementally
+• Test patterns on inline code before scanning large codebases
+• Specify language for faster parsing and better results
+• Use specific paths to reduce search scope and improve performance
+• For relational rules (inside/has), use stopBy: end to search thoroughly
+
 LIMITATIONS:
 • Paths must be within workspace root (security constraint)
-• Pattern syntax is language-specific
-• Metavariables must be complete AST nodes
-• Multi-node metavariables must be named
+• Path depth limited to 6 levels from workspace root (use parent directories for deep paths)
+• Pattern syntax is language-specific (JS patterns won't work in Python)
+• Metavariables must be complete AST nodes (not partial identifiers)
+• Multi-node metavariables must be named ($$$ARGS, not $$$)
+• Control flow patterns (if/with/try blocks) have limited support
+• Multi-line patterns with newlines may not match - prefer single-line or structural rules
+• Not suitable for simple text matching - use grep/ripgrep instead
+• Indentation-sensitive for multi-line patterns
 • High skippedLines in output indicates ast-grep format changes (report issue)
 
 OPERATION MODES:

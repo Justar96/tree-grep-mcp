@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.5] - 2025-11-07
+
+### Added
+- **Simple Text Search Detection** - New validation warns when patterns are better suited for grep/ripgrep
+  - Detects patterns without metavariables or structural elements
+  - Detects string literal patterns (e.g., `"hello world"`)
+  - Provides actionable suggestions with example grep commands
+  - 5 new tests in validation.test.ts for text search detection
+
+### Improved
+- **Enhanced Tool Descriptions** - All three tools (ast_search, ast_replace, ast_run_rule) now include:
+  - **WHEN NOT TO USE** sections with specific scenarios for grep/sed/ripgrep
+  - **BEST PRACTICES** sections with 6-7 actionable recommendations each
+  - **Expanded LIMITATIONS** sections documenting:
+    - Path depth limit (6 levels from workspace root)
+    - Multi-line pattern limitations with newlines
+    - Control flow pattern support constraints
+    - Indentation sensitivity for multi-line patterns
+  - Clear guidance on when to use AST-aware tools vs text-based tools
+
+### Documentation
+- Based on comprehensive real-world usage analysis from agent testing
+- Validated limitations: path depth (6 levels), multi-line patterns, control flow support
+- Confirmed best practices: ast_explain_pattern workflow, structural rules for reliability
+
+## [1.2.2] - 2025-11-07
+
+### Fixed
+- **ast-grep v0.39.7 Compatibility** - Fixed "Rule must specify a set of AST kinds to match" error
+  - Simple pattern-only rules now use `ast-grep run` mode instead of `scan` mode
+  - Scan mode (YAML rules) reserved for structural rules with `kind`, constraints, or fix templates
+  - Constraint and fix validation moved before mode selection to work in both modes
+  - Removed informational stderr logging (binary version, server ready messages) to prevent MCP client warnings
+
+## [1.2.1] - 2025-11-07
+
+### Changed
+- Minor version bump for npm publish
+
 ## [1.2.0] - 2025-01-XX
 
 ### Added

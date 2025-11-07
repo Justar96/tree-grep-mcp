@@ -198,6 +198,35 @@ export class ReplaceTool {
       const pathsProvided = params.paths && Array.isArray(params.paths) && params.paths.length > 0;
       const inputPaths: string[] = pathsProvided && params.paths ? params.paths : ["."];
 
+      // Warn when scanning entire workspace with default path
+      if (!pathsProvided) {
+        const workspaceRoot = this.workspaceManager.getWorkspaceRoot();
+        const home = process.env.HOME || process.env.USERPROFILE || "";
+        
+        // Prevent scanning from home directory or common user directories
+        if (home && path.resolve(workspaceRoot) === path.resolve(home)) {
+          throw new ValidationError(
+            `Cannot replace in home directory without explicit paths. Please provide absolute paths to specific directories.`
+          );
+        }
+        
+        const normalizedRoot = workspaceRoot.toLowerCase();
+        const userDirPatterns = [
+          /[/\\]downloads[/\\]?$/i,
+          /[/\\]documents[/\\]?$/i,
+          /[/\\]desktop[/\\]?$/i,
+        ];
+        if (userDirPatterns.some((pattern) => pattern.test(normalizedRoot))) {
+          throw new ValidationError(
+            `Cannot replace in user directory without explicit paths. Please provide absolute paths to specific directories.`
+          );
+        }
+        
+        console.error(
+          `Warning: No paths provided, replacing in entire workspace from root: ${workspaceRoot}`
+        );
+      }
+
       // Validate that paths are absolute
       // Only allow "." when it's the default (paths not provided by client)
       for (const p of inputPaths) {
@@ -392,9 +421,11 @@ WHEN TO USE:
 • Testing patterns before creating rules with ast_run_rule
 
 WHEN NOT TO USE:
-• Simple text replacement → Use sed/ripgrep
+• Simple text replacement → Use sed for faster, simpler text substitution
 • Need conditional replacements based on metavariable values → Use ast_run_rule with constraints
 • Adding new elements without existing structure → Manual editing required
+• Regex-based find and replace → Use sed or your editor's find/replace
+• Control flow refactoring (complex if/with/try blocks) → Limited support, may require manual editing
 
 METAVARIABLE CONSISTENCY:
 Pattern and replacement must use consistent metavariable names:
@@ -485,12 +516,25 @@ DRY-RUN BEHAVIOR:
 • Output includes diff preview (when dryRun=true) or confirmation (when dryRun=false)
 • ALWAYS review dry-run output before setting dryRun=false
 
+BEST PRACTICES:
+• Always test with dryRun=true first to preview changes
+• Use for structural code refactoring, not simple text replacement
+• Test patterns on inline code before applying to files
+• Break large replacements into smaller, focused passes
+• Specify language for better parsing and validation
+• Review diff preview carefully before applying changes
+
 LIMITATIONS:
 • Replacement must be valid syntax for target language
 • Cannot add structural elements without matching existing ones
 • Complex transformations may require multiple passes
 • Metavariables must be complete AST nodes ($OBJ.$PROP, not $VAR.prop)
 • Paths must be within workspace root (security constraint)
+• Path depth limited to 6 levels from workspace root (use parent directories for deep paths)
+• Control flow refactoring (if/with/try blocks) has limited support
+• Multi-line patterns with newlines may not match - prefer single-line patterns
+• Not suitable for simple text replacement - use sed instead
+• Indentation-sensitive for multi-line patterns
 
 OPERATION MODES:
 

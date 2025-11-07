@@ -262,8 +262,9 @@ export function countWarnings(messages: string[], pattern: RegExp): number {
  * Assert that a binary version log entry was emitted.
  */
 export function assertBinaryVersionLogged(messages: string[], expectedVersion: string): void {
+  // Updated to match new format: "ast-grep vX.X.X (path)"
   const pattern = new RegExp(
-    `version: ${expectedVersion.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}`
+    `ast-grep v${expectedVersion.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}`
   );
   const match = messages.find((msg) => pattern.test(msg));
   if (!match) {

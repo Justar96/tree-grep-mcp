@@ -91,14 +91,9 @@ async function main(): Promise<void> {
     const workspaceRoot = process.env.WORKSPACE_ROOT;
     const workspaceManager = new WorkspaceManager(workspaceRoot);
 
-    console.error(`tree-ast-grep MCP server starting...`);
-    console.error(`Workspace root: ${workspaceManager.getWorkspaceRoot()}`);
-
     // Initialize binary manager
     const binaryManager = new AstGrepBinaryManager(installOptions);
     await binaryManager.initialize();
-
-    console.error(`Binary initialized: ${binaryManager.getBinaryPath()}`);
 
     // Initialize tools
     const searchTool = new SearchTool(binaryManager, workspaceManager);
@@ -214,8 +209,6 @@ async function main(): Promise<void> {
     // Start the server
     const transport = new StdioServerTransport();
     await server.connect(transport);
-
-    console.error("tree-ast-grep MCP server running on stdio");
   } catch (error) {
     console.error("Failed to start MCP server:", error);
     process.exit(1);

@@ -339,20 +339,93 @@ export class ScanTool {
       return map[lower] || lang;
     };
 
-    // Generate simple YAML rule
-    const yaml = this.buildYaml({ ...params, language: normalizeLang(params.language) });
+    // Validate constraints and fix template before mode selection
+    // This validation must happen for both run and scan modes
+    if (params.where || params.fix) {
+      // Extract metavariables from pattern or rule
+      let patternMetavars: Set<string> = new Set();
+      if (params.pattern) {
+        patternMetavars = PatternValidator.extractMetavariables(params.pattern);
+      } else if (params.rule) {
+        patternMetavars = this.extractAllMetavariables(params.rule);
+      }
 
-    // Create temporary rule file with unique name
+      // Validate constraints
+      if (params.where && params.where.length > 0) {
+        for (const constraint of params.where) {
+          // Check metavariable exists
+          if (!patternMetavars.has(constraint.metavariable)) {
+            throw new ValidationError(
+              `Constraint references metavariable '${constraint.metavariable}' which is not in the pattern. ` +
+                `Available metavariables: ${Array.from(patternMetavars).join(", ") || "none"}`
+            );
+          }
+
+          // Validate constraint has at least one operator
+          const hasRegex = constraint.hasOwnProperty("regex") && typeof constraint.regex === "string" && constraint.regex.trim().length > 0;
+          const hasEquals = constraint.hasOwnProperty("equals") && typeof constraint.equals === "string" && constraint.equals.trim().length > 0;
+          const hasNotRegex = constraint.hasOwnProperty("not_regex") && typeof constraint.not_regex === "string" && constraint.not_regex.trim().length > 0;
+          const hasNotEquals = constraint.hasOwnProperty("not_equals") && typeof constraint.not_equals === "string" && constraint.not_equals.trim().length > 0;
+
+          if (!hasRegex && !hasEquals && !hasNotRegex && !hasNotEquals) {
+            throw new ValidationError(
+              `Constraint on metavariable '${constraint.metavariable}' must specify at least one operator: regex, equals, not_regex, not_equals, or kind`
+            );
+          }
+
+          // Validate only one positive operator
+          const positiveOps = [hasRegex, hasEquals].filter(Boolean).length;
+          if (positiveOps > 1) {
+            throw new ValidationError(
+              `Constraint on metavariable '${constraint.metavariable}' cannot specify both 'regex' and 'equals'`
+            );
+          }
+        }
+      }
+
+      // Validate fix template
+      if (params.fix) {
+        const fixMetavars = PatternValidator.extractMetavariables(params.fix);
+        for (const metavar of fixMetavars) {
+          if (!patternMetavars.has(metavar)) {
+            throw new ValidationError(
+              `Fix template uses metavariable '${metavar}' which is not in the pattern. ` +
+                `Available metavariables: ${Array.from(patternMetavars).join(", ") || "none"}`
+            );
+          }
+        }
+      }
+    }
+
+    // Determine if we should use 'run' or 'scan' mode
+    // ast-grep v0.39.7+ requires scan rules to have AST kind specification
+    // For simple pattern-only rules without constraints/fix, use 'run' mode
+    // Note: run mode doesn't support constraints or fix, so use scan mode if those are present
+    const useRunMode = params.pattern && !params.rule && !params.where && !params.fix;
+    
+    // Generate YAML rule (only needed for scan mode)
+    const yaml = useRunMode ? "" : this.buildYaml({ ...params, language: normalizeLang(params.language) });
+
+    // Create temporary rule file with unique name (only for scan mode)
     const tempDir = os.tmpdir();
     const randomSuffix = Math.random().toString(36).substring(2, 15);
-    const rulesFile = path.join(tempDir, `rule-${Date.now()}-${randomSuffix}.yml`);
+    const rulesFile = useRunMode ? "" : path.join(tempDir, `rule-${Date.now()}-${randomSuffix}.yml`);
 
     let tempCodeFileForCleanup: string | null = null;
     try {
-      await fs.writeFile(rulesFile, yaml, "utf8");
+      if (!useRunMode) {
+        await fs.writeFile(rulesFile, yaml, "utf8");
+      }
 
-      // Build scan command (normalize rule file path for ast-grep)
-      const args = ["scan", "--rule", PathValidator.normalizePath(rulesFile), "--json=stream"];
+      // Build command based on mode
+      const args: string[] = [];
+      if (useRunMode) {
+        // Use 'run' mode for simple patterns
+        args.push("run", "--pattern", params.pattern!.trim(), "--lang", normalizeLang(params.language), "--json=stream");
+      } else {
+        // Use 'scan' mode for structural rules
+        args.push("scan", "--rule", PathValidator.normalizePath(rulesFile), "--json=stream");
+      }
 
       // Add paths or inline code via temp file
       let tempCodeFile: string | null = null;
@@ -385,6 +458,35 @@ export class ScanTool {
           params.paths && Array.isArray(params.paths) && params.paths.length > 0;
         const inputPaths: string[] = pathsProvided && params.paths ? params.paths : ["."];
 
+        // Warn when scanning entire workspace with default path
+        if (!pathsProvided) {
+          const workspaceRoot = this.workspaceManager.getWorkspaceRoot();
+          const home = process.env.HOME || process.env.USERPROFILE || "";
+          
+          // Prevent scanning from home directory or common user directories
+          if (home && path.resolve(workspaceRoot) === path.resolve(home)) {
+            throw new ValidationError(
+              `Cannot scan from home directory without explicit paths. Please provide absolute paths to specific directories.`
+            );
+          }
+          
+          const normalizedRoot = workspaceRoot.toLowerCase();
+          const userDirPatterns = [
+            /[/\\]downloads[/\\]?$/i,
+            /[/\\]documents[/\\]?$/i,
+            /[/\\]desktop[/\\]?$/i,
+          ];
+          if (userDirPatterns.some((pattern) => pattern.test(normalizedRoot))) {
+            throw new ValidationError(
+              `Cannot scan from user directory without explicit paths. Please provide absolute paths to specific directories.`
+            );
+          }
+          
+          console.error(
+            `Warning: No paths provided, scanning entire workspace from root: ${workspaceRoot}`
+          );
+        }
+
         // Validate that paths are absolute
         // Only allow "." when it's the default (paths not provided by client)
         for (const p of inputPaths) {
@@ -410,20 +512,23 @@ export class ScanTool {
           p === "" ? "." : PathValidator.normalizePath(p)
         );
 
-        // Validate paths for security (but don't use the absolute resolved paths)
-        const { valid, errors } = this.workspaceManager.validatePaths(normalizedPaths);
-        if (!valid) {
-          // Replace normalized paths in error messages with original paths
-          const originalErrors = errors.map((err) => {
-            let modifiedErr = err;
-            for (let i = 0; i < normalizedPaths.length; i++) {
-              if (normalizedPaths[i] !== inputPaths[i]) {
-                modifiedErr = modifiedErr.replace(normalizedPaths[i], inputPaths[i]);
+        // Validate paths for security (but skip validation for default "." path)
+        // The "." path is relative and will be resolved by ast-grep in the workspace root
+        if (pathsProvided) {
+          const { valid, errors } = this.workspaceManager.validatePaths(normalizedPaths);
+          if (!valid) {
+            // Replace normalized paths in error messages with original paths
+            const originalErrors = errors.map((err) => {
+              let modifiedErr = err;
+              for (let i = 0; i < normalizedPaths.length; i++) {
+                if (normalizedPaths[i] !== inputPaths[i]) {
+                  modifiedErr = modifiedErr.replace(normalizedPaths[i], inputPaths[i]);
+                }
               }
-            }
-            return modifiedErr;
-          });
-          throw new ValidationError("Invalid paths", { errors: originalErrors });
+              return modifiedErr;
+            });
+            throw new ValidationError("Invalid paths", { errors: originalErrors });
+          }
         }
 
         // Pass normalized paths to ast-grep (not absolute resolved paths)
@@ -438,7 +543,7 @@ export class ScanTool {
       const { findings, skippedLines } = this.parseFindings(result.stdout);
 
       const resultObj = {
-        yaml,
+        yaml: useRunMode ? `# Pattern-only rule (using run mode)\npattern: ${params.pattern}\nlanguage: ${normalizeLang(params.language)}` : yaml,
         skippedLines,
         scan: {
           findings,
@@ -456,12 +561,14 @@ export class ScanTool {
       // Cleanup with logging
       const cleanupErrors: string[] = [];
 
-      try {
-        await fs.unlink(rulesFile);
-      } catch (e) {
-        cleanupErrors.push(
-          `Failed to cleanup rule file: ${e instanceof Error ? e.message : String(e)}`
-        );
+      if (!useRunMode && rulesFile) {
+        try {
+          await fs.unlink(rulesFile);
+        } catch (e) {
+          cleanupErrors.push(
+            `Failed to cleanup rule file: ${e instanceof Error ? e.message : String(e)}`
+          );
+        }
       }
 
       if (tempCodeFileForCleanup) {
@@ -929,6 +1036,9 @@ WHEN NOT TO USE:
 • Simple search without constraints → Use ast_search
 • Want to apply changes immediately → Use ast_replace
 • Quick codebase exploration → Use ast_search
+• Simple text matching → Use grep/ripgrep instead
+• Regex-only patterns → ast-grep requires AST structure, use grep with regex
+• Control flow analysis (complex if/with/try blocks) → Limited support
 
 RULE MODES (Automatic Detection):
 This tool automatically detects rule complexity based on parameters provided:
@@ -1097,10 +1207,25 @@ CONSTRAINT RULES:
 • Multiple constraints can target different metavariables
 • kind values must be lowercase with underscores (e.g., function_declaration)
 
+BEST PRACTICES:
+• Use for code quality enforcement and architectural analysis
+• Test rules on inline code before scanning large codebases
+• Start with simple patterns, add constraints to narrow matches
+• Use structural rules (kind/has/inside) for complex matching
+• Always use stopBy: "end" for relational rules (inside/has)
+• Specify language for better parsing and validation
+• Break complex rules into smaller, composable utility rules
+
 LIMITATIONS:
 • Paths must be within workspace root (security constraint)
+• Path depth limited to 6 levels from workspace root (use parent directories for deep paths)
 • Fix templates cannot perform complex transformations
 • Temporary YAML files created and cleaned up automatically
+• Control flow patterns (if/with/try blocks) have limited support
+• Multi-line patterns with newlines may not match - prefer single-line or structural rules
+• Not suitable for simple text matching - use grep/ripgrep instead
+• Constraints support regex and equals only (no complex logic)
+• Indentation-sensitive for multi-line patterns
 
 REFERENCE - MCP to ast-grep CLI Mapping:
 id, language, pattern/rule, severity, message, where, fix → YAML file (temp)

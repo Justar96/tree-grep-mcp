@@ -155,8 +155,6 @@ export class AstGrepBinaryManager {
     if (await this.testBinary(customPath)) {
       this.binaryPath = customPath;
       this.isInitialized = true;
-      const version = await this.extractBinaryVersion(customPath);
-      console.error(`Using custom binary: ${customPath} (version: ${version ?? "unknown"})`);
     } else {
       throw new BinaryError(`Custom binary path "${customPath}" is not valid`);
     }
@@ -170,8 +168,6 @@ export class AstGrepBinaryManager {
     if (systemPath && (await this.testBinary(systemPath))) {
       this.binaryPath = systemPath;
       this.isInitialized = true;
-      const version = await this.extractBinaryVersion(systemPath);
-      console.error(`Using system binary: ${systemPath} (version: ${version ?? "unknown"})`);
     } else {
       throw new BinaryError(
         "ast-grep not found in PATH. Please install ast-grep using one of the official methods:\n" +

@@ -1548,6 +1548,45 @@ describe("PatternValidator - Enhanced Features", () => {
       expect(result.warnings!.some((w) => w.includes("https://"))).toBe(true);
     });
   });
+
+  describe("detectSimpleTextSearch", () => {
+    test("warns on simple text without metavariables or structure", () => {
+      const result = PatternValidator.validatePattern("foobar");
+      expect(result.valid).toBe(true);
+      expect(result.warnings).toBeDefined();
+      expect(result.warnings?.some(w => w.includes("simple text search"))).toBe(true);
+      expect(result.warnings?.some(w => w.includes("grep/ripgrep"))).toBe(true);
+    });
+
+    test("warns on string literal patterns", () => {
+      const result = PatternValidator.validatePattern('"hello world"');
+      expect(result.valid).toBe(true);
+      expect(result.warnings).toBeDefined();
+      expect(result.warnings?.some(w => w.includes("string literal"))).toBe(true);
+      expect(result.warnings?.some(w => w.includes("grep"))).toBe(true);
+    });
+
+    test("does not warn on patterns with metavariables", () => {
+      const result = PatternValidator.validatePattern("console.log($ARG)");
+      expect(result.valid).toBe(true);
+      const hasTextSearchWarning = result.warnings?.some(w => w.includes("simple text search"));
+      expect(hasTextSearchWarning).toBeFalsy();
+    });
+
+    test("does not warn on patterns with structural elements", () => {
+      const result = PatternValidator.validatePattern("function foo() {}");
+      expect(result.valid).toBe(true);
+      const hasTextSearchWarning = result.warnings?.some(w => w.includes("simple text search"));
+      expect(hasTextSearchWarning).toBeFalsy();
+    });
+
+    test("warns on identifier-only patterns", () => {
+      const result = PatternValidator.validatePattern("myVariable");
+      expect(result.valid).toBe(true);
+      expect(result.warnings).toBeDefined();
+      expect(result.warnings?.some(w => w.includes("simple text search"))).toBe(true);
+    });
+  });
 });
 
 /**
