@@ -87,9 +87,6 @@ export interface ValidationResult {
 
 // Installation options for binary management
 export interface InstallationOptions {
-  platform?: "win32" | "darwin" | "linux" | "auto";
   useSystem?: boolean;
-  autoInstall?: boolean;
-  cacheDir?: string;
   customBinaryPath?: string;
 }

@@ -66,7 +66,7 @@ let workspaceManager: WorkspaceManager | undefined;
 // Only run beforeAll if not skipping
 if (!SHOULD_SKIP) {
   beforeAll(async () => {
-    // Initialize binary manager (use system installation if available, auto-install otherwise)
+    // Initialize binary manager (use system installation)
     binaryManager = new AstGrepBinaryManager({
       useSystem: true,
       autoInstall: false, // Rely on system binary in CI

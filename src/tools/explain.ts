@@ -1,0 +1,413 @@
+import { AstGrepBinaryManager } from "../core/binary-manager.js";
+import { WorkspaceManager } from "../core/workspace-manager.js";
+import { ValidationError, ExecutionError } from "../types/errors.js";
+import { PatternValidator, ParameterValidator } from "../utils/validation.js";
+
+interface ExplainParams {
+  pattern: string;
+  code: string;
+  language: string;
+  showAst?: boolean;
+  timeoutMs?: number;
+}
+
+interface MetavariableCapture {
+  value: string;
+  line: number;
+  column: number;
+}
+
+interface ExplainResult {
+  matched: boolean;
+  metavariables: Record<string, MetavariableCapture>;
+  astNodes: string[];
+  suggestions: string[];
+  ast?: string;
+}
+
+/**
+ * Pattern explanation tool that executes ast-grep to show metavariable captures and AST node kinds
+ */
+export class ExplainTool {
+  constructor(
+    private binaryManager: AstGrepBinaryManager,
+    private workspaceManager: WorkspaceManager
+  ) {}
+
+  async execute(paramsRaw: Record<string, unknown>): Promise<ExplainResult> {
+    // Runtime parameter validation with type narrowing
+    const params = paramsRaw as unknown as ExplainParams;
+
+    // Validate required parameters
+    if (!params.pattern || typeof params.pattern !== "string") {
+      throw new ValidationError("Pattern is required and must be a string");
+    }
+
+    if (!params.code || typeof params.code !== "string") {
+      throw new ValidationError("Code is required and must be a string");
+    }
+
+    if (!params.language || typeof params.language !== "string") {
+      throw new ValidationError("Language is required and must be a string");
+    }
+
+    // Validate pattern syntax
+    const patternValidation = PatternValidator.validatePattern(params.pattern, params.language);
+    if (!patternValidation.valid) {
+      throw new ValidationError(`Invalid pattern: ${patternValidation.errors.join("; ")}`, {
+        errors: patternValidation.errors,
+      });
+    }
+
+    // Log warnings if any
+    if (patternValidation.warnings && patternValidation.warnings.length > 0) {
+      for (const warning of patternValidation.warnings) {
+        console.error(`Warning: ${warning}`);
+      }
+    }
+
+    // Validate code size
+    const codeValidation = ParameterValidator.validateCode(params.code);
+    if (!codeValidation.valid) {
+      throw new ValidationError(codeValidation.errors.join("; "), {
+        errors: codeValidation.errors,
+      });
+    }
+
+    // Validate timeout if provided
+    const timeoutValidation = ParameterValidator.validateTimeout(params.timeoutMs);
+    if (!timeoutValidation.valid) {
+      throw new ValidationError(timeoutValidation.errors.join("; "), {
+        errors: timeoutValidation.errors,
+      });
+    }
+
+    // Normalize language aliases
+    const normalizeLang = (lang: string) => {
+      const map: Record<string, string> = {
+        javascript: "js",
+        typescript: "ts",
+        jsx: "jsx",
+        tsx: "tsx",
+        python: "py",
+        py: "py",
+        rust: "rs",
+        rs: "rs",
+        golang: "go",
+        go: "go",
+        java: "java",
+        "c++": "cpp",
+        cpp: "cpp",
+        c: "c",
+        csharp: "cs",
+        cs: "cs",
+        kotlin: "kt",
+        kt: "kt",
+      };
+      const lower = (lang || "").toLowerCase();
+      return map[lower] || lang;
+    };
+
+    const normalizedLang = normalizeLang(params.language);
+
+    // Build CLI command
+    const args = ["run", "--pattern", params.pattern.trim(), "--lang", normalizedLang, "--json=stream", "--stdin"];
+
+    const executeOptions = {
+      cwd: this.workspaceManager.getWorkspaceRoot(),
+      timeout: params.timeoutMs || 10000,
+      stdin: params.code,
+    };
+
+    try {
+      const result = await this.binaryManager.executeAstGrep(args, executeOptions);
+      
+      // Get AST debug output if requested
+      let astDebugOutput: string | undefined;
+      if (params.showAst) {
+        const astArgs = ["run", "--pattern", params.pattern.trim(), "--lang", normalizedLang, "--debug-query=ast", "--stdin"];
+        const astResult = await this.binaryManager.executeAstGrep(astArgs, executeOptions);
+        astDebugOutput = astResult.stdout || astResult.stderr;
+      }
+      
+      return this.parseExplainOutput(result.stdout, params.showAst || false, astDebugOutput);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new ExecutionError(`Pattern explanation failed: ${message}`);
+    }
+  }
+
+  private parseExplainOutput(stdout: string, showAst: boolean, astDebugOutput?: string): ExplainResult {
+    const metavariables: Record<string, MetavariableCapture> = {};
+    const astNodes = new Set<string>();
+    let matched = false;
+    let skippedLines = 0;
+
+    if (!stdout.trim()) {
+      return {
+        matched: false,
+        metavariables: {},
+        astNodes: [],
+        suggestions: this.generateSuggestions(false),
+      };
+    }
+
+    // Parse JSON stream output
+    const lines = stdout.trim().split("\n");
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      
+      try {
+        const json = JSON.parse(line) as {
+          text?: string;
+          metaVariables?: {
+            single?: Record<string, {
+              text?: string;
+              range?: {
+                start?: { line?: number; column?: number };
+              };
+            }>;
+            multi?: Record<string, Array<{
+              text?: string;
+              range?: {
+                start?: { line?: number; column?: number };
+              };
+            }>>;
+          };
+          kind?: string;
+        };
+
+        // If we have a text field, the pattern matched
+        if (json.text) {
+          matched = true;
+        }
+
+        // Extract single metavariables
+        if (json.metaVariables?.single) {
+          for (const [name, capture] of Object.entries(json.metaVariables.single)) {
+            metavariables[name] = {
+              value: capture.text || "",
+              line: (capture.range?.start?.line || 0) + 1, // Convert to 1-based
+              column: capture.range?.start?.column || 0,
+            };
+          }
+        }
+
+        // Extract multi metavariables (concatenate all matched nodes)
+        if (json.metaVariables?.multi) {
+          for (const [name, captures] of Object.entries(json.metaVariables.multi)) {
+            const combinedText = captures.map(c => c.text || "").join(" ");
+            const firstCapture = captures[0];
+            metavariables[name] = {
+              value: combinedText,
+              line: (firstCapture?.range?.start?.line || 0) + 1,
+              column: firstCapture?.range?.start?.column || 0,
+            };
+          }
+        }
+
+        // Extract AST node kinds (tree-sitter node type)
+        if (json.kind) {
+          astNodes.add(json.kind);
+        }
+      } catch {
+        // Skip malformed JSON lines and count them
+        skippedLines++;
+        console.error(`Warning: Skipped malformed JSON line: ${line.substring(0, 100)}...`);
+        continue;
+      }
+    }
+
+    if (skippedLines > 0) {
+      console.error(
+        `Warning: Skipped ${skippedLines} malformed result lines out of ${lines.length} total lines`
+      );
+    }
+
+    const result: ExplainResult = {
+      matched,
+      metavariables,
+      astNodes: Array.from(astNodes),
+      suggestions: this.generateSuggestions(matched),
+    };
+
+    // Add AST field if requested
+    if (showAst && astDebugOutput) {
+      result.ast = astDebugOutput;
+    }
+
+    return result;
+  }
+
+  private generateSuggestions(matched: boolean): string[] {
+    if (matched) {
+      return [];
+    }
+
+    return [
+      "Pattern did not match. Try:",
+      "- Verify pattern syntax matches language AST structure",
+      "- Check metavariable names are UPPER_CASE",
+      "- Use $NAME for multi-node matches (not bare $)",
+      "- Test with simpler pattern first",
+      "- Use ast_search to verify pattern works on files",
+    ];
+  }
+
+  static getSchema() {
+    return {
+      name: "ast_explain_pattern",
+      description: `Debug and understand AST patterns by showing metavariable captures, AST node kinds, and helpful suggestions. Perfect for pattern development and troubleshooting.
+
+QUICK START:
+Explain a simple pattern:
+{ "pattern": "console.log($ARG)", "code": "console.log('hello');", "language": "javascript" }
+
+Explain a function pattern:
+{ "pattern": "function $NAME($$$PARAMS) { $$$BODY }", "code": "function test(a, b) { return a + b; }", "language": "javascript" }
+
+WHEN TO USE:
+• Developing new AST patterns - see what metavariables capture
+• Debugging pattern match failures - get actionable suggestions
+• Learning AST structure - see node kinds for your code
+• Understanding metavariable behavior - see exact captures and positions
+• Testing patterns quickly before using in search/replace/scan
+
+WHEN NOT TO USE:
+• Searching files for patterns → Use ast_search
+• Applying fixes to code → Use ast_replace
+• Running rules with constraints → Use ast_run_rule
+• Production code scanning → Use ast_run_rule
+
+PATTERN SYNTAX:
+• $VAR - Single AST node (expression, identifier, statement)
+• $$$NAME - Multiple nodes, MUST be named (bare $$$ rejected)
+• $_ - Anonymous match (use when you don't need to reference it)
+
+Metavariable rules:
+1. Must be complete AST nodes: Use "$OBJ.$PROP", not "$VAR.prop"
+2. Multi-node must be named: "$$$ARGS" not "$$$"
+3. Language-specific: JavaScript patterns won't work in Python
+4. Match structure, not text: "foo" won't match "foobar"
+
+COMMON PATTERNS:
+
+1. Function calls:
+   Any arguments: "functionName($$$ARGS)"
+   Exactly one: "functionName($ARG)"
+   Exactly two: "functionName($A, $B)"
+
+2. Function definitions:
+   Any function: "function $NAME($$$PARAMS) { $$$BODY }"
+   Arrow function: "($$$PARAMS) => $BODY"
+
+3. Class patterns:
+   Basic: "class $NAME { $$$MEMBERS }"
+   With extends: "class $NAME extends $BASE { $$$MEMBERS }"
+
+PATTERN LIBRARY:
+For more pattern examples, see: https://github.com/justar96/tree-grep-mcp/blob/main/PATTERN_LIBRARY.md
+
+OUTPUT STRUCTURE:
+{
+  "matched": boolean,          // true if pattern matched the code
+  "metavariables": {           // Captured metavariables with positions
+    "ARG": {
+      "value": "'hello'",      // Captured code text
+      "line": 1,              // 1-based line number
+      "column": 12            // 0-based column
+    }
+  },
+  "astNodes": ["call_expression", "string"],  // AST node kinds of matches
+  "suggestions": [],          // Debugging tips (empty if matched)
+  "ast": "..."               // AST debug output (only when showAst: true)
+}
+
+ERROR RECOVERY:
+
+If pattern fails to match, check these common issues:
+
+1. "Pattern is required"
+   → Add pattern parameter
+   → Example: { pattern: "console.log($ARG)", code: "...", language: "javascript" }
+
+2. "Code is required"
+   → Add code parameter with inline code to test
+   → Example: { pattern: "$P", code: "console.log('test');", language: "javascript" }
+
+3. "Language is required"
+   → Add language parameter (always required)
+   → Example: { pattern: "$P", code: "...", language: "javascript" }
+
+4. "Invalid pattern: Use named multi-node metavariables like $$$BODY"
+   → Replace "$$$" with "$$$NAME"
+   → Bare $$$ is rejected
+
+5. matched: false with suggestions
+   → Pattern syntax is valid but doesn't match code
+   → Follow suggestions to fix pattern
+   → Try with ast_search on real files to verify pattern works
+
+6. Empty metavariables but matched: true
+   → Pattern has no metavariables (e.g., "console.log()")
+   → This is expected for literal patterns
+
+LIMITATIONS:
+• Only works with inline code (not file paths)
+• Default timeout 10 seconds (configurable via timeoutMs)
+• Language parameter always required
+• Code size limited to 1MB
+• AST node kinds shown in astNodes array (not per-metavariable)
+
+PERFORMANCE:
+• Fast execution (default 10s timeout, max 300s)
+• No file I/O overhead
+• Perfect for iterative pattern development
+• Adjust timeout for complex patterns
+
+REFERENCE - MCP to ast-grep CLI Mapping:
+pattern → --pattern <value>
+language → --lang <value>
+code → --stdin (with stdin input)
+timeoutMs → process timeout (not a CLI flag)
+showAst → --debug-query=ast (separate call when true)
+
+Example: { pattern: "console.log($ARG)", code: "console.log('test');", language: "js" }
+CLI: ast-grep run --pattern "console.log($ARG)" --lang js --json=stream --stdin
+
+Example with AST: { pattern: "console.log($ARG)", code: "console.log('test');", language: "js", showAst: true }
+CLI: ast-grep run --pattern "console.log($ARG)" --lang js --json=stream --stdin
+     ast-grep run --pattern "console.log($ARG)" --lang js --debug-query=ast --stdin`,
+
+      inputSchema: {
+        type: "object",
+        properties: {
+          pattern: {
+            type: "string",
+            description:
+              "AST pattern with metavariables ($VAR, $$$NAME, $_). Must be valid syntax for target language.",
+          },
+          code: {
+            type: "string",
+            description: "Inline code to test the pattern against. Required for pattern explanation.",
+          },
+          language: {
+            type: "string",
+            description:
+              "Programming language (js/ts/py/java/rust/go/cpp/kotlin/csharp). Required.",
+          },
+          showAst: {
+            type: "boolean",
+            description: "Include AST debug output in result. When true, executes a second ast-grep call with --debug-query=ast to show the pattern's AST structure. Default: false.",
+          },
+          timeoutMs: {
+            type: "number",
+            description: "Timeout in milliseconds (1000-300000). Default: 10000. Increase for complex patterns or slow systems.",
+          },
+        },
+        required: ["pattern", "code", "language"],
+        additionalProperties: false,
+      },
+    };
+  }
+}

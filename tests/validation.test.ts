@@ -469,7 +469,7 @@ describe("ScanTool.buildYaml", () => {
         language: "javascript",
         pattern: "console.log($ARG)",
         where: [
-          { metavariable: "ARG" }, // Missing both regex and equals
+          { metavariable: "ARG" }, // Missing all operators
         ],
       };
 
@@ -479,7 +479,7 @@ describe("ScanTool.buildYaml", () => {
       } catch (error) {
         expect(error).toBeInstanceOf(ValidationError);
         expect((error as ValidationError).message).toContain(
-          "Constraint for metavariable 'ARG' must specify either 'regex' or 'equals' with a non-empty value"
+          "must specify at least one operator: regex, equals, not_regex, not_equals, or kind"
         );
       }
     });
@@ -500,7 +500,7 @@ describe("ScanTool.buildYaml", () => {
       } catch (error) {
         expect(error).toBeInstanceOf(ValidationError);
         expect((error as ValidationError).message).toContain(
-          "must specify either 'regex' or 'equals' with a non-empty value"
+          "must specify at least one operator"
         );
       }
     });
@@ -511,7 +511,7 @@ describe("ScanTool.buildYaml", () => {
         language: "javascript",
         pattern: "console.log($ARG)",
         where: [
-          { metavariable: "ARG", equals: "" }, // Empty equals
+          { metavariable: "ARG", equals: "" }, // Empty equals (trimmed to empty)
         ],
       };
 
@@ -521,7 +521,7 @@ describe("ScanTool.buildYaml", () => {
       } catch (error) {
         expect(error).toBeInstanceOf(ValidationError);
         expect((error as ValidationError).message).toContain(
-          "must specify either 'regex' or 'equals' with a non-empty value"
+          "must specify at least one operator"
         );
       }
     });
@@ -531,7 +531,7 @@ describe("ScanTool.buildYaml", () => {
     // that constraints with 'equals' are converted to anchored regex (^value$) via the
     // code path that handles both regex and equals constraints.
 
-    test("prefers regex when both regex and equals are provided", () => {
+    test("throws ValidationError when both regex and equals are provided", async () => {
       const params = {
         id: "test-rule",
         language: "javascript",
@@ -539,9 +539,15 @@ describe("ScanTool.buildYaml", () => {
         where: [{ metavariable: "ARG", regex: "test.*", equals: "value" }],
       };
 
-      const yaml = (scanTool as any).buildYaml(params);
-      expect(yaml).toContain("test.*");
-      expect(yaml).not.toContain("^value$");
+      try {
+        await scanTool.execute(params);
+        expect(true).toBe(false); // Should not reach here
+      } catch (error) {
+        expect(error).toBeInstanceOf(ValidationError);
+        expect((error as ValidationError).message).toContain(
+          "cannot specify both 'regex' and 'equals'"
+        );
+      }
     });
 
     test("validates constraint with valid regex pattern", () => {
@@ -902,6 +908,11 @@ describe("ParameterValidator", () => {
 
 // ============================================
 // PathValidator Tests
+//
+// Note: These tests verify path normalization (backslash → forward slash conversion)
+// which is separate from path validation (absolute path requirement).
+// Normalization is applied to ALL paths before validation occurs.
+// See WorkspaceManager.validatePath() for absolute path validation tests.
 // ============================================
 describe("PathValidator", () => {
   describe("normalizePath", () => {

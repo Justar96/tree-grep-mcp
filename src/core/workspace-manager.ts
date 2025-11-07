@@ -218,13 +218,9 @@ export class WorkspaceManager {
         };
       }
 
-      // Normalize Windows paths to forward slashes for ast-grep compatibility
-      const normalizedInput = PathValidator.normalizePath(inputPath);
-
-      // Step 2 & 3: Simplified path validation without resolution
-      // Since paths are absolute, validate workspace boundaries directly
-      const normalizedRoot = PathValidator.normalizePath(path.resolve(this.config.root));
-      const relativeFromRoot = path.relative(normalizedRoot, normalizedInput);
+      // Step 2 & 3: Compute workspace boundary and depth checks on OS-native paths
+      // Use path.relative() with OS-native paths before normalization
+      const relativeFromRoot = path.relative(this.config.root, inputPath);
 
       // Ensure the path is within the workspace root
       if (relativeFromRoot === "" || relativeFromRoot === ".") {
@@ -232,38 +228,41 @@ export class WorkspaceManager {
       } else if (relativeFromRoot.startsWith(".." + path.sep) || relativeFromRoot === "..") {
         return {
           valid: false,
-          resolvedPath: normalizedInput,
+          resolvedPath: inputPath,
           error: `Path "${inputPath}" is outside workspace root`,
         };
       }
 
-      // Step 4: Security checks remain unchanged
-      // Check against blocked paths
-      for (const blockedPath of this.config.blockedPaths) {
-        if (normalizedInput.startsWith(PathValidator.normalizePath(blockedPath))) {
-          return {
-            valid: false,
-            resolvedPath: normalizedInput,
-            error: `Access to system directory "${inputPath}" is blocked`,
-          };
-        }
-      }
-
-      // Check depth limit
+      // Check depth limit using OS-native relative path
       const depth = relativeFromRoot.split(path.sep).length;
 
       if (depth > this.config.maxDepth) {
         return {
           valid: false,
-          resolvedPath: normalizedInput,
+          resolvedPath: inputPath,
           error: `Path depth (${depth}) exceeds maximum allowed depth (${this.config.maxDepth})`,
         };
       }
 
-      // Step 5: Return normalized absolute path (already normalized at line 220)
+      // Step 4: Security checks on absolute input path
+      // Check against blocked paths
+      for (const blockedPath of this.config.blockedPaths) {
+        if (inputPath.startsWith(blockedPath)) {
+          return {
+            valid: false,
+            resolvedPath: inputPath,
+            error: `Access to system directory "${inputPath}" is blocked`,
+          };
+        }
+      }
+
+      // Step 5: After all validations pass, normalize path for ast-grep compatibility
+      // Normalize Windows paths to forward slashes only at the end
+      const normalizedPath = PathValidator.normalizePath(inputPath);
+
       return {
         valid: true,
-        resolvedPath: normalizedInput,
+        resolvedPath: normalizedPath,
       };
     } catch (error) {
       // Step 6: Error handling

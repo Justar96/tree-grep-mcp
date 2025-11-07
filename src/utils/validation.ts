@@ -559,6 +559,15 @@ export class PathValidator {
    * - Mixed separators: C:\Users/project -> C:/Users/project
    * - Unix paths: /home/user -> /home/user (unchanged)
    * - Relative paths with backslashes: src\fixtures -> src/fixtures
+   *
+   * Usage Contexts:
+   * This method is primarily used for internal binary/cache/temp paths created by the
+   * binary manager to ensure cross-platform compatibility. User-provided paths from
+   * MCP agents are validated by WorkspaceManager and may be normalized separately by
+   * individual tools as needed before passing to ast-grep.
+   *
+   * Note: Node.js fs methods accept both separators on Windows, so normalization
+   * is primarily for ast-grep CLI which expects forward slashes on all platforms.
    */
   static normalizePath(inputPath: string): string {
     if (!inputPath || inputPath === "" || inputPath === ".") {
@@ -606,8 +615,16 @@ export class PathValidator {
       return false;
     }
 
-    // Use Node.js built-in for primary check
-    // This handles Unix absolute paths and Windows drive letters correctly
+    // Check for Windows absolute paths with drive letters (e.g., C:\, D:/)
+    // This must be checked before path.isAbsolute() to ensure Windows paths
+    // are detected as absolute even on non-Windows platforms
+    if (this.isWindowsAbsolutePath(inputPath)) {
+      return true;
+    }
+
+    // Use Node.js built-in for Unix absolute paths
+    // On Unix/Linux, this checks for leading slash (/)
+    // On Windows, this handles drive letters and UNC paths
     const isAbsolute = path.isAbsolute(inputPath);
     if (isAbsolute) {
       return true;
@@ -771,6 +788,39 @@ export class ParameterValidator {
       const mb = (bytes / (1024 * 1024)).toFixed(2);
       errors.push(
         `code parameter cannot exceed 1MB (1,048,576 bytes). Received: ${bytes} bytes (${kb}KB / ${mb}MB). Consider using file paths instead of inline code for large code snippets.`
+      );
+    }
+
+    return { valid: errors.length === 0, errors };
+  }
+
+  /**
+   * Validate constraint kind parameter
+   */
+  static validateConstraintKind(kind: unknown): ValidationResult {
+    const errors: string[] = [];
+
+    if (kind === undefined || kind === null) {
+      return { valid: true, errors: [] };
+    }
+
+    if (typeof kind !== "string") {
+      errors.push(
+        `kind must be a string. Received type: ${typeof kind}. Example: kind: "function_declaration"`
+      );
+      return { valid: false, errors };
+    }
+
+    if (kind.trim().length === 0) {
+      errors.push(
+        'kind parameter cannot be empty. Provide a valid AST node type. Example: kind: "identifier"'
+      );
+      return { valid: false, errors };
+    }
+
+    if (!/^[a-z_]+$/.test(kind)) {
+      errors.push(
+        `Invalid kind: "${kind}". Must be lowercase with underscores (e.g., 'function_declaration', 'string_literal', 'identifier'). See AST_GREP_DOCUMENTS.md for valid node types.`
       );
     }
 

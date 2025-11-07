@@ -1,6 +1,6 @@
 {
   "name": "@cabbages/tree-grep",
-  "version": "1.1.4",
+  "version": "1.2.0",
   "description": "Simple, direct ast-grep wrapper for AI coding agents. Zero abstractions, maximum performance.",
   "main": "./build/index.js",
   "bin": {
@@ -83,13 +83,8 @@
       "command": "npx",
       "args": [
         "-y",
-        "@cabbages/tree-grep",
-        "--auto-install"
-      ],
-      "env": {
-        "WORKSPACE_ROOT": "${workspaceFolder}",
-        "AST_GREP_CACHE_DIR": "C:\\Users\\YourUsername\\.ast-grep-mcp\\binaries"
-      }
+        "@cabbages/tree-grep"
+      ]
     }
   }
 }

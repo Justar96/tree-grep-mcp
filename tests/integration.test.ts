@@ -26,6 +26,7 @@
 
 import { describe, test, expect, beforeAll } from "bun:test";
 import { spawnSync } from "child_process";
+import path from "path";
 import { SearchTool } from "../src/tools/search.js";
 import { ReplaceTool } from "../src/tools/replace.js";
 import { ScanTool } from "../src/tools/scan.js";
@@ -155,9 +156,11 @@ console.log("Starting application");
   // Comment 1: Add file-based test using fixtures
   test("JavaScript console.log to logger.info (file-based)", async () => {
     // Step 1: Search in fixture files
+    // Use absolute path for file-based search
+    const absolutePath = path.join(process.cwd(), "tests/fixtures/js/");
     const searchResult = await searchTool!.execute({
       pattern: "console.log($$$ARGS)",
-      paths: ["tests/fixtures/js/"],
+      paths: [absolutePath],
       language: "javascript",
     });
 
@@ -167,10 +170,11 @@ console.log("Starting application");
     const searchCount = searchResult.summary.totalMatches;
 
     // Step 2: Replace in fixture files (dry-run)
+    // Use absolute path for file-based replace
     const replaceResult = await replaceTool!.execute({
       pattern: "console.log($$$ARGS)",
       replacement: "logger.info($$$ARGS)",
-      paths: ["tests/fixtures/js/"],
+      paths: [absolutePath],
       language: "javascript",
       dryRun: true,
     });
@@ -376,14 +380,96 @@ calculate(1, 2, 3);
 
   // Comment 1: Add file-based test for TypeScript
   test("TypeScript class definitions (file-based)", async () => {
+    // Use absolute path for file-based search
+    const absolutePath = path.join(process.cwd(), "tests/fixtures/ts/");
     const result = await searchTool!.execute({
       pattern: "class $NAME { $$$MEMBERS }",
-      paths: ["tests/fixtures/ts/"],
+      paths: [absolutePath],
       language: "typescript",
     });
 
     expect(result.matches.length).toBeGreaterThan(0);
     expect(result.summary.skippedLines).toBe(0);
+  });
+
+  test("Rejects relative paths with ValidationError", async () => {
+    // Validates Phase 2 implementation - tools reject relative paths with real binary
+    try {
+      await searchTool!.execute({
+        pattern: "console.log($ARGS)",
+        paths: ["tests/fixtures/js/"],
+        language: "javascript",
+      });
+      throw new Error("Expected ValidationError but none was thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(ValidationError);
+      const message = (error as Error).message;
+      expect(message).toContain("Path must be absolute");
+      expect(message).toMatch(/\/workspace\/src\/|C:\/workspace\/src\//);
+    }
+  });
+
+  test("ReplaceTool rejects relative paths with ValidationError", async () => {
+    try {
+      await replaceTool!.execute({
+        pattern: "console.log($ARGS)",
+        replacement: "logger.info($ARGS)",
+        paths: ["tests/fixtures/js/"],
+        language: "javascript",
+        dryRun: true,
+      });
+      throw new Error("Expected ValidationError but none was thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(ValidationError);
+      expect((error as Error).message).toContain("Path must be absolute");
+    }
+  });
+
+  test("ScanTool rejects relative paths with ValidationError", async () => {
+    try {
+      await scanTool!.execute({
+        id: "test-rule",
+        language: "javascript",
+        pattern: "console.log($ARGS)",
+        paths: ["tests/fixtures/js/"],
+      });
+      throw new Error("Expected ValidationError but none was thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(ValidationError);
+      expect((error as Error).message).toContain("Path must be absolute");
+    }
+  });
+
+  test("Accepts absolute paths in all tools", async () => {
+    // Positive test case verifying absolute paths work correctly in all tools
+    const absolutePath = path.join(process.cwd(), "tests/fixtures/js/");
+
+    // SearchTool with absolute path - expect success
+    const searchResult = await searchTool!.execute({
+      pattern: "console.log($ARGS)",
+      paths: [absolutePath],
+      language: "javascript",
+    });
+    expect(searchResult.matches.length).toBeGreaterThanOrEqual(0);
+
+    // ReplaceTool with absolute path - expect success (dry-run)
+    const replaceResult = await replaceTool!.execute({
+      pattern: "console.log($ARGS)",
+      replacement: "logger.info($ARGS)",
+      paths: [absolutePath],
+      language: "javascript",
+      dryRun: true,
+    });
+    expect(replaceResult.summary.dryRun).toBe(true);
+
+    // ScanTool with absolute path - expect success
+    const scanResult = await scanTool!.execute({
+      id: "test-absolute-path",
+      language: "javascript",
+      pattern: "console.log($ARGS)",
+      paths: [absolutePath],
+    });
+    expect(scanResult.scan.summary.totalFindings).toBeGreaterThanOrEqual(0);
   });
 
   // Comment 6: Test Python with both full name and alias
@@ -783,42 +869,53 @@ describeEdgeCases("Edge Cases and Robustness", () => {
 // ============================================
 // Windows Path Handling Tests
 // ============================================
-const describeWindowsPaths = SHOULD_SKIP ? describe.skip : describe;
+const describeWindowsPaths = SHOULD_SKIP || process.platform !== "win32" ? describe.skip : describe;
 
 describeWindowsPaths("Windows Path Handling", () => {
   test("WorkspaceManager normalizes Windows backslash paths", () => {
     if (!workspaceManager) throw new Error("WorkspaceManager not initialized");
 
-    // Test that validatePaths normalizes backslashes to forward slashes
-    const result = workspaceManager.validatePaths(["src\\fixtures"]);
+    const windowsDirectory = path.join(process.cwd(), "tests\\fixtures");
+    const result = workspaceManager.validatePaths([windowsDirectory]);
+
     expect(result.valid).toBe(true);
     expect(result.resolvedPaths.length).toBe(1);
-    // Resolved path should use forward slashes
-    expect(result.resolvedPaths[0]).toContain("/");
-    // Should not contain backslashes (except on Windows in the absolute portion)
-    if (process.platform !== "win32") {
-      expect(result.resolvedPaths[0]).not.toContain("\\");
-    }
+    expect(result.resolvedPaths[0]).toBe(windowsDirectory.replace(/\\/g, "/"));
+    expect(result.resolvedPaths[0]).not.toContain("\\");
   });
 
   test("WorkspaceManager normalizes Windows mixed separator paths", () => {
     if (!workspaceManager) throw new Error("WorkspaceManager not initialized");
 
-    // Test mixed separators: backslash and forward slash
-    const result = workspaceManager.validatePaths(["src\\fixtures/test.js"]);
+    const windowsFile = path.join(process.cwd(), "tests\\fixtures\\js\\sample.js");
+    const mixedSeparators = windowsFile.replace("\\js\\", "\\js/");
+    const result = workspaceManager.validatePaths([mixedSeparators]);
+
     expect(result.valid).toBe(true);
     expect(result.resolvedPaths.length).toBe(1);
-    // Should normalize all separators to forward slashes
-    expect(result.resolvedPaths[0]).toMatch(/src\/fixtures\/test\.js/);
+    expect(result.resolvedPaths[0]).toBe(windowsFile.replace(/\\/g, "/"));
+    expect(result.resolvedPaths[0]).not.toContain("\\");
+  });
+
+  test("WorkspaceManager rejects blocked Windows system directory", () => {
+    if (!workspaceManager) throw new Error("WorkspaceManager not initialized");
+
+    const systemDirectory = path.join("C:\\Windows", "System32");
+    const result = workspaceManager.validatePaths([systemDirectory]);
+
+    expect(result.valid).toBe(false);
+    expect(result.errors.length).toBe(1);
+    expect(result.errors[0]).toMatch(/Access to system directory/i);
+    expect(result.errors[0]).toContain(systemDirectory);
   });
 
   test("search with paths parameter using Windows backslashes", async () => {
     if (!searchTool) throw new Error("SearchTool not initialized");
 
-    // Test with backslash paths - should succeed without ValidationError
+    const windowsDirectory = path.join(process.cwd(), "tests\\fixtures");
     const result = await searchTool!.execute({
       pattern: "import",
-      paths: ["tests\\fixtures"],
+      paths: [windowsDirectory],
       language: "javascript",
     });
 
@@ -831,10 +928,11 @@ describeWindowsPaths("Windows Path Handling", () => {
   test("search with paths parameter using Windows forward slashes", async () => {
     if (!searchTool) throw new Error("SearchTool not initialized");
 
-    // Test with forward slash paths (normalized form)
+    const windowsDirectory = path.join(process.cwd(), "tests\\fixtures");
+    const forwardSlashPath = windowsDirectory.replace(/\\/g, "/");
     const result = await searchTool!.execute({
       pattern: "import",
-      paths: ["tests/fixtures"],
+      paths: [forwardSlashPath],
       language: "javascript",
     });
 
@@ -847,9 +945,11 @@ describeWindowsPaths("Windows Path Handling", () => {
     if (!searchTool) throw new Error("SearchTool not initialized");
 
     // Test with mixed separators
+    const basePath = path.join(process.cwd(), "tests\\fixtures\\js\\sample.js");
+    const mixedSeparators = basePath.replace("\\fixtures\\js\\", "\\fixtures/js/");
     const result = await searchTool!.execute({
       pattern: "import",
-      paths: ["tests\\fixtures/sample.js"],
+      paths: [mixedSeparators],
       language: "javascript",
     });
 
@@ -862,10 +962,11 @@ describeWindowsPaths("Windows Path Handling", () => {
     if (!replaceTool) throw new Error("ReplaceTool not initialized");
 
     // Test replace with backslash paths in dry-run mode
+    const windowsDirectory = path.join(process.cwd(), "tests\\fixtures");
     const result = await replaceTool!.execute({
       pattern: "var $NAME = $VALUE",
       replacement: "const $NAME = $VALUE",
-      paths: ["tests\\fixtures"],
+      paths: [windowsDirectory],
       language: "javascript",
       dryRun: true,
     });
@@ -880,10 +981,12 @@ describeWindowsPaths("Windows Path Handling", () => {
     if (!replaceTool) throw new Error("ReplaceTool not initialized");
 
     // Test replace with forward slash paths
+    const windowsDirectory = path.join(process.cwd(), "tests\\fixtures");
+    const forwardSlashPath = windowsDirectory.replace(/\\/g, "/");
     const result = await replaceTool!.execute({
       pattern: "var $NAME = $VALUE",
       replacement: "const $NAME = $VALUE",
-      paths: ["tests/fixtures"],
+      paths: [forwardSlashPath],
       language: "javascript",
       dryRun: true,
     });
@@ -898,11 +1001,12 @@ describeWindowsPaths("Windows Path Handling", () => {
     if (!scanTool) throw new Error("ScanTool not initialized");
 
     // Test scan with backslash paths
+    const windowsDirectory = path.join(process.cwd(), "tests\\fixtures");
     const result = await scanTool.execute({
       id: "test-rule",
       pattern: "console.log($ARG)",
       language: "javascript",
-      paths: ["tests\\fixtures"],
+      paths: [windowsDirectory],
     });
 
     expect(result).toBeDefined();
@@ -1054,64 +1158,68 @@ describeCrossPlatform("Cross-Platform Path Resolution", () => {
     expect(typeof isWindows).toBe("boolean");
   });
 
-  test('search with paths: ["."] uses workspace root', async () => {
+  test('search with paths: ["."] is rejected as relative', async () => {
     if (!searchTool) throw new Error("SearchTool not initialized");
 
-    // Test that current directory path works
-    const result = await searchTool!.execute({
-      pattern: "import",
-      paths: ["."],
-      language: "javascript",
-    });
-
-    expect(result).toBeDefined();
-    expect(result.summary).toBeDefined();
-    expect(result.summary.totalMatches).toBeGreaterThanOrEqual(0);
+    try {
+      await searchTool!.execute({
+        pattern: "import",
+        paths: ["."],
+        language: "javascript",
+      });
+      expect(true).toBe(false);
+    } catch (error) {
+      expect(error).toBeInstanceOf(ValidationError);
+      expect((error as ValidationError).message).toContain("Path must be absolute");
+    }
   });
 
-  test('search with paths: ["src/"] includes trailing separator', async () => {
+  test('search with paths: ["src/"] rejects relative directory', async () => {
     if (!searchTool) throw new Error("SearchTool not initialized");
 
-    // Test path with trailing separator
-    const result = await searchTool!.execute({
-      pattern: "import",
-      paths: ["src/"],
-      language: "javascript",
-    });
-
-    expect(result).toBeDefined();
-    expect(result.summary).toBeDefined();
-    expect(result.summary.totalMatches).toBeGreaterThanOrEqual(0);
+    try {
+      await searchTool!.execute({
+        pattern: "import",
+        paths: ["src/"],
+        language: "javascript",
+      });
+      expect(true).toBe(false);
+    } catch (error) {
+      expect(error).toBeInstanceOf(ValidationError);
+      expect((error as ValidationError).message).toContain("Path must be absolute");
+    }
   });
 
-  test('search with paths: ["src"] without trailing separator', async () => {
+  test('search with paths: ["src"] rejects relative directory', async () => {
     if (!searchTool) throw new Error("SearchTool not initialized");
 
-    // Test path without trailing separator
-    const result = await searchTool!.execute({
-      pattern: "import",
-      paths: ["src"],
-      language: "javascript",
-    });
-
-    expect(result).toBeDefined();
-    expect(result.summary).toBeDefined();
-    expect(result.summary.totalMatches).toBeGreaterThanOrEqual(0);
+    try {
+      await searchTool!.execute({
+        pattern: "import",
+        paths: ["src"],
+        language: "javascript",
+      });
+      expect(true).toBe(false);
+    } catch (error) {
+      expect(error).toBeInstanceOf(ValidationError);
+      expect((error as ValidationError).message).toContain("Path must be absolute");
+    }
   });
 
-  test('search with paths: [""] empty string uses current directory', async () => {
+  test('search with paths: [""] rejects empty string', async () => {
     if (!searchTool) throw new Error("SearchTool not initialized");
 
-    // Test empty string path (should default to current directory)
-    const result = await searchTool!.execute({
-      pattern: "import",
-      paths: [""],
-      language: "javascript",
-    });
-
-    expect(result).toBeDefined();
-    expect(result.summary).toBeDefined();
-    expect(result.summary.totalMatches).toBeGreaterThanOrEqual(0);
+    try {
+      await searchTool!.execute({
+        pattern: "import",
+        paths: [""],
+        language: "javascript",
+      });
+      expect(true).toBe(false);
+    } catch (error) {
+      expect(error).toBeInstanceOf(ValidationError);
+      expect((error as ValidationError).message).toContain("Path must be absolute");
+    }
   });
 
   test('search with paths: [".."] throws ValidationError (outside workspace)', async () => {
@@ -1128,29 +1236,44 @@ describeCrossPlatform("Cross-Platform Path Resolution", () => {
       expect(true).toBe(false);
     } catch (error) {
       expect(error).toBeInstanceOf(ValidationError);
-      expect((error as ValidationError).message).toContain("outside workspace");
+      expect((error as ValidationError).message).toContain("Path must be absolute");
     }
   });
 
   test("mixed separator paths produce consistent results", async () => {
     if (!searchTool) throw new Error("SearchTool not initialized");
 
-    // Test backslash version
+    const basePath = path.join(process.cwd(), "tests", "fixtures");
+    const backslashPath = basePath;
+    const forwardSlashPath = basePath.replace(/\\/g, "/");
+    const mixedSeparatorPath =
+      process.platform === "win32"
+        ? backslashPath.replace("\\fixtures\\", "\\fixtures/")
+        : forwardSlashPath;
+
+    // Test backslash or native version
     const result1 = await searchTool!.execute({
       pattern: "import",
-      paths: ["tests\\fixtures"],
+      paths: [backslashPath],
       language: "javascript",
     });
 
     // Test forward slash version (normalized)
     const result2 = await searchTool!.execute({
       pattern: "import",
-      paths: ["tests/fixtures"],
+      paths: [forwardSlashPath],
       language: "javascript",
     });
 
-    // Both should succeed and produce same results
+    const result3 = await searchTool!.execute({
+      pattern: "import",
+      paths: [mixedSeparatorPath],
+      language: "javascript",
+    });
+
+    // All variants should succeed and produce same results
     expect(result1.summary.totalMatches).toBe(result2.summary.totalMatches);
+    expect(result1.summary.totalMatches).toBe(result3.summary.totalMatches);
   });
 
   test("Windows absolute path on POSIX throws ValidationError", async () => {
@@ -1181,10 +1304,12 @@ describeCrossPlatform("Cross-Platform Path Resolution", () => {
   test("replace operation with path parameter", async () => {
     if (!replaceTool) throw new Error("ReplaceTool not initialized");
 
+    const absolutePath = path.join(process.cwd(), "tests", "fixtures");
+
     const result = await replaceTool!.execute({
       pattern: "var $NAME = $VALUE",
       replacement: "let $NAME = $VALUE",
-      paths: ["tests/fixtures"],
+      paths: [absolutePath],
       language: "javascript",
       dryRun: true,
     });
@@ -1197,12 +1322,15 @@ describeCrossPlatform("Cross-Platform Path Resolution", () => {
   test("scan with path parameter", async () => {
     if (!scanTool) throw new Error("ScanTool not initialized");
 
+    const absolutePath = path.join(process.cwd(), "tests", "fixtures");
+    const forwardSlashPath = absolutePath.replace(/\\/g, "/");
+
     const result = await scanTool.execute({
       id: "cross-platform-test",
       pattern: "console.$METHOD($$$ARGS)",
       language: "javascript",
       message: "Console usage detected",
-      paths: ["tests/fixtures"],
+      paths: [forwardSlashPath],
     });
 
     expect(result).toBeDefined();
@@ -1218,41 +1346,31 @@ describeCrossPlatform("Path Validation with Windows Paths", () => {
   test("blocked path C:\\Windows\\System32 throws ValidationError", async () => {
     if (!searchTool) throw new Error("SearchTool not initialized");
 
+    const systemDirectory = path.join("C:\\Windows", "System32");
+
     // Guard: Only test on Windows where this path exists
     if (process.platform !== "win32") {
-      // On non-Windows, C:\Windows\System32 would be rejected as Windows absolute path
+      // On non-Windows, the path should be rejected as a Windows absolute path
       try {
         await searchTool!.execute({
           pattern: "import",
-          paths: ["C:\\Windows\\System32"],
+          paths: [systemDirectory],
           language: "javascript",
         });
         expect(true).toBe(false);
       } catch (error) {
         expect(error).toBeInstanceOf(ValidationError);
-        // Should mention Windows absolute path not supported on non-Windows
         expect((error as ValidationError).message).toContain("Windows absolute path");
       }
       return;
     }
 
-    // On Windows, test that system directory is blocked
-    try {
-      await searchTool!.execute({
-        pattern: "import",
-        paths: ["C:\\Windows\\System32"],
-        language: "javascript",
-      });
-      // Should not reach here
-      expect(true).toBe(false);
-    } catch (error) {
-      expect(error).toBeInstanceOf(ValidationError);
-      const message = (error as ValidationError).message;
-      // Error should contain original input path
-      expect(message).toContain("C:\\Windows\\System32");
-      // Should mention blocking or access denied
-      expect(message.toLowerCase()).toMatch(/block|access|system directory/);
-    }
+    if (!workspaceManager) throw new Error("WorkspaceManager not initialized");
+
+    const validationResult = workspaceManager.validatePaths([systemDirectory]);
+    expect(validationResult.valid).toBe(false);
+    expect(validationResult.errors[0]).toContain(systemDirectory);
+    expect(validationResult.errors[0].toLowerCase()).toMatch(/blocked|access/);
   });
 
   test("path escaping workspace via ..\\..\\..\\etc throws ValidationError", async () => {
@@ -1270,10 +1388,7 @@ describeCrossPlatform("Path Validation with Windows Paths", () => {
     } catch (error) {
       expect(error).toBeInstanceOf(ValidationError);
       const message = (error as ValidationError).message;
-      // Error should reference the original input
-      expect(message).toContain("..\\..\\..\\etc");
-      // Should mention workspace boundary violation
-      expect(message.toLowerCase()).toMatch(/outside|workspace|boundary/);
+      expect(message).toContain("Path must be absolute");
     }
   });
 
@@ -1292,8 +1407,7 @@ describeCrossPlatform("Path Validation with Windows Paths", () => {
     } catch (error) {
       expect(error).toBeInstanceOf(ValidationError);
       const message = (error as ValidationError).message;
-      // Should mention outside workspace
-      expect(message.toLowerCase()).toMatch(/outside|workspace/);
+      expect(message).toContain("Path must be absolute");
     }
   });
 
@@ -1443,12 +1557,16 @@ const describeTimeoutHandling = SHOULD_SKIP ? describe.skip : describe;
 
 describeTimeoutHandling("Timeout Handling", () => {
   test("Search with very short timeout (error expected)", async () => {
-    if (!searchTool) throw new Error("Tools not initialized");
+    if (!searchTool || !workspaceManager) throw new Error("Tools not initialized");
 
     // Use a timeout too short to complete (1 second)
-    const result = await searchTool.execute({
+    const result = await searchTool!.execute({
       pattern: "const $NAME = $VALUE",
-      paths: ["."],
+      code: `
+const alpha = 1;
+const beta = 2;
+const gamma = alpha + beta;
+`,
       language: "javascript",
       timeoutMs: 1000,
     });
@@ -1772,9 +1890,10 @@ describeStdinVsFileMode("Stdin vs File Mode Behavior", () => {
   test("Search with file mode (paths parameter)", async () => {
     if (!searchTool) throw new Error("Tools not initialized");
 
+    const absolutePath = path.join(process.cwd(), "tests/fixtures/js/");
     const result = await searchTool.execute({
       pattern: "const $NAME = $VALUE",
-      paths: ["tests/fixtures/js/"],
+      paths: [absolutePath],
       language: "javascript",
     });
 
@@ -1803,10 +1922,11 @@ describeStdinVsFileMode("Stdin vs File Mode Behavior", () => {
   test("Replace with file mode (paths parameter)", async () => {
     if (!replaceTool) throw new Error("Tools not initialized");
 
+    const absolutePath = path.join(process.cwd(), "tests/fixtures/js/");
     const result = await replaceTool.execute({
       pattern: "var $NAME = $VALUE",
       replacement: "const $NAME = $VALUE",
-      paths: ["tests/fixtures/js/"],
+      paths: [absolutePath],
       language: "javascript",
       dryRun: true,
     });

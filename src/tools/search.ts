@@ -119,6 +119,8 @@ export class SearchTool {
         "c++": "cpp",
         cpp: "cpp",
         c: "c",
+        csharp: "cs",
+        cs: "cs",
         kotlin: "kt",
         kt: "kt",
       };
@@ -161,11 +163,28 @@ export class SearchTool {
       executeOptions.stdin = params.code;
     } else {
       // File mode - add paths (default to current directory)
-      // Filter out empty strings and convert them to "."
-      const inputPaths: string[] =
-        params.paths && Array.isArray(params.paths) && params.paths.length > 0
-          ? params.paths.map((p) => (p === "" ? "." : p)).filter((p) => p !== "")
-          : ["."];
+      // Only use "." as default when paths are omitted
+      const pathsProvided = params.paths && Array.isArray(params.paths) && params.paths.length > 0;
+      const inputPaths: string[] = pathsProvided && params.paths ? params.paths : ["."];
+
+      // Validate that paths are absolute
+      // Only allow "." when it's the default (paths not provided by client)
+      for (const p of inputPaths) {
+        if (!path.isAbsolute(p)) {
+          if (p === "." || p === "") {
+            // "." or "" only allowed when paths were not provided (default case)
+            if (pathsProvided) {
+              throw new ValidationError(
+                `Path must be absolute. Use '/workspace/src/' or 'C:/workspace/src/'`
+              );
+            }
+          } else {
+            throw new ValidationError(
+              `Path must be absolute. Use '/workspace/src/' or 'C:/workspace/src/'`
+            );
+          }
+        }
+      }
 
       // Normalize paths for ast-grep compatibility (Windows -> forward slashes)
       // Empty strings should be treated as current directory
@@ -219,7 +238,8 @@ export class SearchTool {
   }
 
   /**
-   * Resolves relative file paths to absolute paths using workspace root.
+   * Resolves file paths to absolute paths.
+   * Since input paths are absolute, ast-grep returns absolute paths.
    * STDIN and empty strings are returned as-is.
    */
   private resolveFilePath(filePath: string): string {
@@ -227,8 +247,12 @@ export class SearchTool {
     if (filePath === "STDIN" || filePath === "") {
       return filePath;
     }
-    // Convert relative paths to absolute using workspace root
-    return path.resolve(this.workspaceManager.getWorkspaceRoot(), filePath);
+    // If path is already absolute, return as-is
+    if (path.isAbsolute(filePath)) {
+      return filePath;
+    }
+    // Return unchanged if not absolute (contract: ast-grep returns absolute paths when given absolute inputs)
+    return filePath;
   }
 
   private parseResults(stdout: string, params: SearchParams): SearchResult {
@@ -301,7 +325,7 @@ export class SearchTool {
 
 QUICK START:
 Search JavaScript files for console.log calls:
-{ "pattern": "console.log($ARG)", "paths": ["src/"], "language": "javascript" }
+{ "pattern": "console.log($ARG)", "paths": ["/workspace/src/"], "language": "javascript" }
 
 Search inline code (language REQUIRED):
 { "pattern": "console.log($ARG)", "code": "console.log('test');", "language": "javascript" }
@@ -361,6 +385,9 @@ JSX/TSX (set language to 'jsx' or 'tsx'):
    Event handler: "<Button onClick={$HANDLER}>"
    WARNING: Broad patterns like "<$TAG>" match thousands of elements - be specific
 
+PATTERN LIBRARY:
+For more pattern examples, see: https://github.com/justar96/tree-grep-mcp/blob/main/PATTERN_LIBRARY.md
+
 ERROR RECOVERY:
 
 If search fails, check these common issues:
@@ -370,9 +397,10 @@ If search fails, check these common issues:
    → Example: { pattern: "$P", code: "test", language: "javascript" }
 
 2. "Invalid paths"
-   → Use relative paths within workspace (e.g., "src/", not "/etc/")
+   → Use absolute paths like '/workspace/src/' or 'C:/workspace/src/'
+   → Relative paths are not supported (will be rejected with validation error)
    → Paths validated against workspace root for security
-   → Omit paths to search entire workspace
+   → Omit paths to search entire workspace (defaults to current directory)
 
 3. "Invalid pattern: Use named multi-node metavariables like $$BODY instead of bare $$"
    → Replace "$$$" with "$$$NAME"
@@ -409,7 +437,7 @@ OPERATION MODES:
 File/Directory Mode (default):
 • Specify paths or omit for current directory
 • Language optional but recommended for performance
-• Example: { pattern: "console.log($$$ARGS)", paths: ["src/"], language: "javascript" }
+• Example: { pattern: "console.log($$$ARGS)", paths: ["/workspace/src/"], language: "javascript" }
 
 Inline Code Mode:
 • Use code parameter for testing patterns on snippets
@@ -438,8 +466,8 @@ context → --context <number>
 maxMatches → result slicing (not a CLI flag)
 timeoutMs → process timeout (not a CLI flag)
 
-Example: { pattern: "console.log($ARG)", paths: ["src/"], language: "js", context: 2 }
-CLI: ast-grep run --pattern "console.log($ARG)" --lang js --context 2 --json=stream src/`,
+Example: { pattern: "console.log($ARG)", paths: ["/workspace/src/"], language: "js", context: 2 }
+CLI: ast-grep run --pattern "console.log($ARG)" --lang js --context 2 --json=stream /workspace/src/`,
 
       inputSchema: {
         type: "object",
@@ -458,12 +486,12 @@ CLI: ast-grep run --pattern "console.log($ARG)" --lang js --context 2 --json=str
             type: "array",
             items: { type: "string" },
             description:
-              "File/directory paths within workspace. Omit to search entire workspace. Security validated.",
+              "ABSOLUTE file/directory paths within workspace (e.g., '/workspace/src/', 'C:/workspace/src/'). Relative paths NOT supported. Omit to search entire workspace. Security validated.",
           },
           language: {
             type: "string",
             description:
-              "Programming language (js/ts/py/java/rust/go/cpp). Required for inline code, recommended for paths.",
+              "Programming language (js/ts/py/java/rust/go/cpp/kotlin/csharp). Required for inline code, recommended for paths.",
           },
           context: {
             type: "number",

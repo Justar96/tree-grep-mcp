@@ -21,11 +21,14 @@
  */
 
 import { describe, test, expect, beforeAll, spyOn } from "bun:test";
+import path from "path";
 import { SearchTool } from "../src/tools/search.js";
 import { ReplaceTool } from "../src/tools/replace.js";
 import { ScanTool } from "../src/tools/scan.js";
+import { ExplainTool } from "../src/tools/explain.js";
 import { AstGrepBinaryManager } from "../src/core/binary-manager.js";
 import { WorkspaceManager } from "../src/core/workspace-manager.js";
+import { ValidationError } from "../src/types/errors.js";
 import {
   assertCliFlag,
   assertCliFlagAbsent,
@@ -37,6 +40,14 @@ import {
   parseYamlSafe,
 } from "./helpers/stderr-capture.js";
 
+function getAbsolutePath(relativePath: string): string {
+  return path.join(process.cwd(), relativePath);
+}
+
+function normalizeCliPath(inputPath: string): string {
+  return inputPath.replace(/\\/g, "/");
+}
+
 // ============================================
 // Test Setup and Shared Instances
 // ============================================
@@ -46,6 +57,7 @@ let workspaceManager: WorkspaceManager;
 let searchTool: SearchTool;
 let replaceTool: ReplaceTool;
 let scanTool: ScanTool;
+let explainTool: ExplainTool;
 
 // Captured CLI arguments from mocked executeAstGrep
 let capturedArgs: string[] = [];
@@ -67,6 +79,7 @@ beforeAll(async () => {
   searchTool = new SearchTool(binaryManager, workspaceManager);
   replaceTool = new ReplaceTool(binaryManager, workspaceManager);
   scanTool = new ScanTool(workspaceManager, binaryManager);
+  explainTool = new ExplainTool(binaryManager, workspaceManager);
 
   // Mock executeAstGrep to capture args without execution
   spyOn(binaryManager, "executeAstGrep").mockImplementation(
@@ -168,39 +181,55 @@ describe("SearchTool CLI Flag Mapping", () => {
   });
 
   test("--stdin flag absent and paths present when code not provided", async () => {
+    const absolutePath = getAbsolutePath("src/");
+    const expectedPath = normalizeCliPath(absolutePath);
+
     await searchTool.execute({
       pattern: "console.log($ARG)",
-      paths: ["src/"],
+      paths: [absolutePath],
       language: "javascript",
     });
 
     // Verify --stdin is absent and paths are positional arguments
     assertCliCommand(capturedArgs, "run");
     assertCliFlagAbsent(capturedArgs, "--stdin");
-    assertPositionalArgs(capturedArgs, ["src/"]);
+    assertPositionalArgs(capturedArgs, [expectedPath]);
   });
 
   test("Positional arguments for multiple paths", async () => {
+    const absolutePaths = [getAbsolutePath("src/"), getAbsolutePath("tests/")];
+    const normalizedPaths = absolutePaths.map(normalizeCliPath);
+
     await searchTool.execute({
       pattern: "console.log($ARG)",
-      paths: ["src/", "tests/"],
+      paths: absolutePaths,
       language: "javascript",
     });
 
     // Verify multiple paths as positional arguments (AST_GREP_ALL_DOCUMENTS.md line 355)
     assertCliCommand(capturedArgs, "run");
-    assertPositionalArgs(capturedArgs, ["src/", "tests/"]);
+    assertPositionalArgs(capturedArgs, normalizedPaths);
   });
 
   test("Default path '.' when paths not provided", async () => {
-    await searchTool.execute({
-      pattern: "console.log($ARG)",
-      language: "javascript",
-    });
+    const validateSpy = spyOn(workspaceManager, "validatePaths").mockImplementation(() => ({
+      valid: true,
+      resolvedPaths: ["."],
+      errors: [],
+    }));
 
-    // Verify default path '.' when paths omitted (AST_GREP_ALL_DOCUMENTS.md line 355)
-    assertCliCommand(capturedArgs, "run");
-    assertPositionalArgs(capturedArgs, ["."]);
+    try {
+      await searchTool.execute({
+        pattern: "console.log($ARG)",
+        language: "javascript",
+      });
+
+      // Verify default path '.' when paths omitted (AST_GREP_ALL_DOCUMENTS.md line 355)
+      assertCliCommand(capturedArgs, "run");
+      assertPositionalArgs(capturedArgs, ["."]);
+    } finally {
+      validateSpy.mockRestore();
+    }
   });
 
   test("Language alias normalization (typescript -> ts)", async () => {
@@ -412,42 +441,58 @@ describe("ReplaceTool CLI Flag Mapping", () => {
   });
 
   test("--stdin flag absent and paths present when code not provided", async () => {
+    const absolutePath = getAbsolutePath("src/");
+    const expectedPath = normalizeCliPath(absolutePath);
+
     await replaceTool.execute({
       pattern: "var $NAME = $VALUE",
       replacement: "const $NAME = $VALUE",
-      paths: ["src/"],
+      paths: [absolutePath],
       language: "javascript",
     });
 
     // Verify --stdin is absent and paths are positional arguments
     assertCliCommand(capturedArgs, "run");
     assertCliFlagAbsent(capturedArgs, "--stdin");
-    assertPositionalArgs(capturedArgs, ["src/"]);
+    assertPositionalArgs(capturedArgs, [expectedPath]);
   });
 
   test("Positional arguments for multiple paths", async () => {
+    const absolutePaths = [getAbsolutePath("src/"), getAbsolutePath("tests/")];
+    const normalizedPaths = absolutePaths.map(normalizeCliPath);
+
     await replaceTool.execute({
       pattern: "var $NAME = $VALUE",
       replacement: "const $NAME = $VALUE",
-      paths: ["src/", "tests/"],
+      paths: absolutePaths,
       language: "javascript",
     });
 
     // Verify multiple paths as positional arguments
     assertCliCommand(capturedArgs, "run");
-    assertPositionalArgs(capturedArgs, ["src/", "tests/"]);
+    assertPositionalArgs(capturedArgs, normalizedPaths);
   });
 
   test("Default path '.' when paths not provided", async () => {
-    await replaceTool.execute({
-      pattern: "var $NAME = $VALUE",
-      replacement: "const $NAME = $VALUE",
-      language: "javascript",
-    });
+    const validateSpy = spyOn(workspaceManager, "validatePaths").mockImplementation(() => ({
+      valid: true,
+      resolvedPaths: ["."],
+      errors: [],
+    }));
 
-    // Verify default path '.' when paths omitted
-    assertCliCommand(capturedArgs, "run");
-    assertPositionalArgs(capturedArgs, ["."]);
+    try {
+      await replaceTool.execute({
+        pattern: "var $NAME = $VALUE",
+        replacement: "const $NAME = $VALUE",
+        language: "javascript",
+      });
+
+      // Verify default path '.' when paths omitted
+      assertCliCommand(capturedArgs, "run");
+      assertPositionalArgs(capturedArgs, ["."]);
+    } finally {
+      validateSpy.mockRestore();
+    }
   });
 
   test("CLI flag order: run, --pattern, --rewrite, --lang, --update-all, --stdin, paths", async () => {
@@ -564,36 +609,52 @@ describe("ScanTool CLI Flag Mapping", () => {
   });
 
   test("Paths as positional arguments when code not provided", async () => {
+    const absolutePath = getAbsolutePath("src/");
+    const expectedPath = normalizeCliPath(absolutePath);
+
     await scanTool.execute({
       id: "no-console",
       language: "javascript",
       pattern: "console.log($ARG)",
-      paths: ["src/"],
+      paths: [absolutePath],
     });
 
     // Verify paths as positional arguments
     assertCliCommand(capturedArgs, "scan");
-    assertPositionalArgs(capturedArgs, ["src/"]);
+    assertPositionalArgs(capturedArgs, [expectedPath]);
   });
 
   test("Default path '.' when paths and code not provided", async () => {
-    await scanTool.execute({
-      id: "no-console",
-      language: "javascript",
-      pattern: "console.log($ARG)",
-    });
+    const validateSpy = spyOn(workspaceManager, "validatePaths").mockImplementation(() => ({
+      valid: true,
+      resolvedPaths: ["."],
+      errors: [],
+    }));
 
-    // Verify default path '.' when both paths and code omitted
-    assertCliCommand(capturedArgs, "scan");
-    assertPositionalArgs(capturedArgs, ["."]);
+    try {
+      await scanTool.execute({
+        id: "no-console",
+        language: "javascript",
+        pattern: "console.log($ARG)",
+      });
+
+      // Verify default path '.' when both paths and code omitted
+      assertCliCommand(capturedArgs, "scan");
+      assertPositionalArgs(capturedArgs, ["."]);
+    } finally {
+      validateSpy.mockRestore();
+    }
   });
 
   test("CLI flag order: scan, --rule, <file>, --json=stream, paths", async () => {
+    const absolutePath = getAbsolutePath("src/");
+    const expectedPath = normalizeCliPath(absolutePath);
+
     await scanTool.execute({
       id: "no-console",
       language: "javascript",
       pattern: "console.log($ARG)",
-      paths: ["src/"],
+      paths: [absolutePath],
     });
 
     // Verify exact CLI flag order matches implementation
@@ -601,7 +662,7 @@ describe("ScanTool CLI Flag Mapping", () => {
     expect(capturedArgs[1]).toBe("--rule");
     expect(capturedArgs[2]).toMatch(/rule-.*\.yml$/);
     expect(capturedArgs[3]).toBe("--json=stream");
-    expect(capturedArgs[4]).toBe("src/");
+    expect(capturedArgs[4]).toBe(expectedPath);
   });
 
   test("timeoutMs parameter not a CLI flag (process timeout)", async () => {
@@ -822,6 +883,185 @@ describe("YAML Generation Validation", () => {
 });
 
 // ============================================
+// Enhanced Constraints YAML Generation Tests
+// ============================================
+
+describe("Enhanced Constraints YAML Generation", () => {
+  test("YAML with not_regex constraint generates nested not structure", async () => {
+    // Reference: AST_GREP_DOCUMENTS.md lines 7443-7463 for constraint syntax
+    const result = await scanTool.execute({
+      id: "test-not-regex",
+      language: "javascript",
+      pattern: "const $NAME = $VALUE",
+      where: [{ metavariable: "NAME", not_regex: "^_" }],
+      code: "const x = 1;",
+    });
+
+    // Assert YAML structure contains not: and nested regex:
+    expect(result.yaml).toContain("not:");
+    expect(result.yaml).toContain("regex:");
+    
+    // Verify indentation: not: at 4 spaces, regex: at 6 spaces
+    const lines = result.yaml.split("\n");
+    const notLine = lines.find((l) => l.includes("not:") && !l.includes("not_"));
+    const regexLineAfterNot = lines.find((l, i) => {
+      const notIdx = lines.indexOf(notLine!);
+      return i > notIdx && l.includes("regex:") && l.includes("^_");
+    });
+    
+    expect(notLine).toBeDefined();
+    expect(regexLineAfterNot).toBeDefined();
+    expect(notLine).toMatch(/^\s{4}not:/);
+    expect(regexLineAfterNot).toMatch(/^\s{6}regex:/);
+  });
+
+  test("YAML with not_equals constraint generates anchored regex in not structure", async () => {
+    const result = await scanTool.execute({
+      id: "test-not-equals",
+      language: "javascript",
+      pattern: "console.$METHOD($ARG)",
+      where: [{ metavariable: "METHOD", not_equals: "log" }],
+      code: "console.log(x);",
+    });
+
+    // Assert YAML contains not: and anchored regex pattern
+    expect(result.yaml).toContain("not:");
+    expect(result.yaml).toContain("^log$");
+    
+    // Verify equals is converted to anchored regex before wrapping in not
+    const lines = result.yaml.split("\n");
+    const regexLine = lines.find((l) => l.includes("^log$"));
+    expect(regexLine).toBeDefined();
+  });
+
+  test("YAML with kind constraint generates kind field", async () => {
+    const result = await scanTool.execute({
+      id: "test-kind",
+      language: "javascript",
+      pattern: "console.log($ARG)",
+      where: [{ metavariable: "ARG", kind: "identifier" }],
+      code: "console.log(x);",
+    });
+
+    // Assert YAML contains kind: identifier
+    expect(result.yaml).toContain("kind:");
+    expect(result.yaml).toContain("identifier");
+    
+    // Verify kind is at same indentation level as regex (4 spaces)
+    const lines = result.yaml.split("\n");
+    const kindLine = lines.find((l) => l.trim().startsWith("kind:") && l.includes("identifier"));
+    expect(kindLine).toBeDefined();
+    expect(kindLine).toMatch(/^\s{4}kind:/);
+  });
+
+  test("YAML with multiple constraint operators for same metavariable", async () => {
+    const result = await scanTool.execute({
+      id: "test-multiple-ops",
+      language: "javascript",
+      pattern: "const $VAR = $VALUE",
+      where: [{ metavariable: "VAR", regex: "^test", kind: "identifier" }],
+      code: "const test = 1;",
+    });
+
+    // Assert both regex: and kind: present in YAML
+    expect(result.yaml).toContain("regex:");
+    expect(result.yaml).toContain("kind:");
+    
+    // Parse YAML to verify structure
+    const yaml = parseYamlSafe(result.yaml);
+    expect(yaml.constraints).toBeDefined();
+    const constraints = yaml.constraints as Record<string, unknown>;
+    expect(constraints.VAR).toBeDefined();
+    const varConstraint = constraints.VAR as Record<string, unknown>;
+    expect(varConstraint.regex).toBeDefined();
+    expect(varConstraint.kind).toBe("identifier");
+  });
+
+  test("YAML with mixed positive and negative constraints", async () => {
+    const result = await scanTool.execute({
+      id: "test-mixed",
+      language: "javascript",
+      pattern: "const $NAME = $VALUE",
+      where: [
+        { metavariable: "NAME", regex: "^[a-z]" },
+        { metavariable: "VALUE", not_regex: "^_" },
+      ],
+      code: "const name = value;",
+    });
+
+    // Assert first constraint has direct regex:, second has not: { regex: ... }
+    expect(result.yaml).toContain("NAME:");
+    expect(result.yaml).toContain("VALUE:");
+    
+    const lines = result.yaml.split("\n");
+    const nameIdx = lines.findIndex((l) => l.includes("NAME:"));
+    const valueIdx = lines.findIndex((l) => l.includes("VALUE:"));
+    
+    // Find regex after NAME (should be direct)
+    const regexAfterName = lines.find((l, i) => i > nameIdx && i < valueIdx && l.includes("regex:"));
+    expect(regexAfterName).toBeDefined();
+    expect(regexAfterName).not.toContain("not:");
+    
+    // Find not: after VALUE (should have nested structure)
+    const notAfterValue = lines.find((l, i) => i > valueIdx && l.includes("not:"));
+    expect(notAfterValue).toBeDefined();
+  });
+
+  test("YAML escaping for special characters in not_regex", async () => {
+    const result = await scanTool.execute({
+      id: "test-escape-not-regex",
+      language: "javascript",
+      pattern: "const $NAME = $VALUE",
+      where: [{ metavariable: "NAME", not_regex: ".*test.*" }],
+      code: "const x = 1;",
+    });
+
+    // Assert special regex characters properly escaped in YAML
+    expect(result.yaml).toContain(".*test.*");
+    
+    // Parse YAML to verify pattern is preserved correctly
+    const yaml = parseYamlSafe(result.yaml);
+    expect(yaml.constraints).toBeDefined();
+  });
+
+  test("YAML escaping for special characters in not_equals", async () => {
+    const result = await scanTool.execute({
+      id: "test-escape-not-equals",
+      language: "javascript",
+      pattern: "const $NAME = $VALUE",
+      where: [{ metavariable: "NAME", not_equals: "value.with.dots" }],
+      code: "const x = 1;",
+    });
+
+    // Assert dots are escaped before anchoring and wrapping in not
+    expect(result.yaml).toContain("not:");
+    expect(result.yaml).toContain("^value\\.with\\.dots$");
+  });
+
+  test("YAML with kind containing underscores", async () => {
+    const result = await scanTool.execute({
+      id: "test-kind-underscores",
+      language: "javascript",
+      pattern: "function $NAME() { $$$BODY }",
+      where: [{ metavariable: "NAME", kind: "identifier" }],
+      code: "function test() {}",
+    });
+
+    // Assert underscores preserved in YAML
+    expect(result.yaml).toContain("kind:");
+    expect(result.yaml).toContain("identifier");
+    
+    // Parse YAML to verify structure
+    const yaml = parseYamlSafe(result.yaml);
+    expect(yaml.constraints).toBeDefined();
+    const constraints = yaml.constraints as Record<string, unknown>;
+    expect(constraints.NAME).toBeDefined();
+    const nameConstraint = constraints.NAME as Record<string, unknown>;
+    expect(nameConstraint.kind).toBe("identifier");
+  });
+});
+
+// ============================================
 // Temp File Lifecycle Tests
 // ============================================
 
@@ -921,6 +1161,7 @@ describe("Language Normalization", () => {
       { input: "rust", expected: "rs" },
       { input: "golang", expected: "go" },
       { input: "c++", expected: "cpp" },
+      { input: "csharp", expected: "cs" },
       { input: "kotlin", expected: "kt" },
     ];
 
@@ -943,6 +1184,7 @@ describe("Language Normalization", () => {
       { input: "rust", expected: "rs" },
       { input: "golang", expected: "go" },
       { input: "c++", expected: "cpp" },
+      { input: "csharp", expected: "cs" },
       { input: "kotlin", expected: "kt" },
     ];
 
@@ -966,6 +1208,7 @@ describe("Language Normalization", () => {
       { input: "rust", expected: "rs" },
       { input: "golang", expected: "go" },
       { input: "c++", expected: "cpp" },
+      { input: "csharp", expected: "cs" },
       { input: "kotlin", expected: "kt" },
     ];
 
@@ -979,6 +1222,29 @@ describe("Language Normalization", () => {
 
       const yaml = parseYamlSafe(result.yaml);
       assertYamlField(yaml, "language", expected);
+    }
+  });
+
+  test("All ExplainTool language aliases normalized correctly", async () => {
+    const aliases = [
+      { input: "javascript", expected: "js" },
+      { input: "typescript", expected: "ts" },
+      { input: "python", expected: "py" },
+      { input: "rust", expected: "rs" },
+      { input: "golang", expected: "go" },
+      { input: "c++", expected: "cpp" },
+      { input: "csharp", expected: "cs" },
+      { input: "kotlin", expected: "kt" },
+    ];
+
+    for (const { input, expected } of aliases) {
+      await explainTool.execute({
+        pattern: "$VAR",
+        code: "test",
+        language: input,
+      });
+
+      assertCliFlag(capturedArgs, "--lang", expected);
     }
   });
 
@@ -1008,57 +1274,332 @@ describe("Language Normalization", () => {
 // ============================================
 
 describe("Path Handling", () => {
-  test("Relative paths preserved in CLI arguments", async () => {
+  test("Absolute paths passed as CLI positional arguments", async () => {
+    // Paths must be absolute per Phase 1-4 implementation
+    const absolutePaths = [getAbsolutePath("src/utils/"), getAbsolutePath("tests/unit/")];
+    const normalizedPaths = absolutePaths.map(normalizeCliPath);
+
     await searchTool.execute({
       pattern: "console.log($ARG)",
-      paths: ["src/utils/", "tests/unit/"],
+      paths: absolutePaths,
       language: "javascript",
     });
 
-    assertPositionalArgs(capturedArgs, ["src/utils/", "tests/unit/"]);
+    assertPositionalArgs(capturedArgs, normalizedPaths);
   });
 
   test("Single file path as positional argument", async () => {
+    // File paths must be absolute
+    const absolutePath = getAbsolutePath("src/index.ts");
+    const expectedPath = normalizeCliPath(absolutePath);
+
     await searchTool.execute({
       pattern: "console.log($ARG)",
-      paths: ["src/index.ts"],
+      paths: [absolutePath],
       language: "javascript",
     });
 
-    assertPositionalArgs(capturedArgs, ["src/index.ts"]);
+    assertPositionalArgs(capturedArgs, [expectedPath]);
   });
 
   test("Empty paths array defaults to current directory", async () => {
-    await searchTool.execute({
-      pattern: "console.log($ARG)",
-      paths: [],
-      language: "javascript",
-    });
+    const validateSpy = spyOn(workspaceManager, "validatePaths").mockImplementation(() => ({
+      valid: true,
+      resolvedPaths: ["."],
+      errors: [],
+    }));
 
-    assertPositionalArgs(capturedArgs, ["."]);
+    try {
+      await searchTool.execute({
+        pattern: "console.log($ARG)",
+        paths: [],
+        language: "javascript",
+      });
+
+      assertPositionalArgs(capturedArgs, ["."]);
+    } finally {
+      validateSpy.mockRestore();
+    }
   });
 
-  test("Path normalization for Windows paths (forward slashes)", async () => {
-    // Note: WorkspaceManager.validatePaths normalizes Windows paths
-    // This test verifies that normalized paths are passed to CLI
+  test("Windows backslashes normalized to forward slashes in absolute paths", async () => {
+    // WorkspaceManager normalizes Windows absolute paths before passing to CLI
+    const absolutePath = getAbsolutePath("src/tools/");
+    const expected = absolutePath.replace(/\\/g, "/");
+
     await searchTool.execute({
       pattern: "console.log($ARG)",
-      paths: ["src/tools/"], // Already normalized
+      paths: [absolutePath],
       language: "javascript",
     });
 
-    const positionalArgs = capturedArgs.slice(capturedArgs.indexOf("src/tools/"));
-    expect(positionalArgs[0]).toBe("src/tools/");
-    expect(positionalArgs[0]).not.toContain("\\"); // No backslashes
+    assertPositionalArgs(capturedArgs, [expected]);
+    expect(expected).not.toContain("\\"); // No backslashes after normalization
   });
 
   test("Multiple paths with mixed file and directory", async () => {
+    // Mixed file and directory paths must all be absolute
+    const absolutePaths = [
+      getAbsolutePath("src/"),
+      getAbsolutePath("tests/integration.test.ts"),
+      getAbsolutePath("build/"),
+    ];
+    const normalizedPaths = absolutePaths.map(normalizeCliPath);
+
     await searchTool.execute({
       pattern: "console.log($ARG)",
-      paths: ["src/", "tests/integration.test.ts", "build/"],
+      paths: absolutePaths,
       language: "javascript",
     });
 
-    assertPositionalArgs(capturedArgs, ["src/", "tests/integration.test.ts", "build/"]);
+    assertPositionalArgs(capturedArgs, normalizedPaths);
+  });
+
+  test("Rejects relative paths with clear error message", async () => {
+    try {
+      await searchTool.execute({
+        pattern: "console.log($ARG)",
+        paths: ["src/utils/"],
+        language: "javascript",
+      });
+      throw new Error("Expected ValidationError but none was thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(ValidationError);
+      const message = (error as Error).message;
+      expect(message).toContain("Path must be absolute");
+      expect(message).toContain("/workspace/src/");
+    }
+  });
+
+  test("Rejects multiple relative paths (fails on first)", async () => {
+    try {
+      await searchTool.execute({
+        pattern: "console.log($ARG)",
+        paths: ["src/", "tests/"],
+        language: "javascript",
+      });
+      throw new Error("Expected ValidationError but none was thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(ValidationError);
+      const message = (error as Error).message;
+      expect(message).toContain("Path must be absolute");
+      expect(message).toContain("/workspace/src/");
+    }
+  });
+
+  test("Rejects mixed absolute and relative paths", async () => {
+    try {
+      await searchTool.execute({
+        pattern: "console.log($ARG)",
+        paths: [getAbsolutePath("src/"), "tests/"],
+        language: "javascript",
+      });
+      throw new Error("Expected ValidationError but none was thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(ValidationError);
+      const message = (error as Error).message;
+      expect(message).toContain("Path must be absolute");
+      expect(message).toContain("/workspace/src/");
+    }
+  });
+
+  test("Explicit current directory marker (.) is rejected", async () => {
+    try {
+      await searchTool.execute({
+        pattern: "console.log($ARG)",
+        paths: ["."],
+        language: "javascript",
+      });
+      throw new Error("Expected ValidationError but none was thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(ValidationError);
+      expect((error as Error).message).toContain("Path must be absolute");
+    }
+  });
+});
+
+// ============================================
+// ExplainTool CLI Flag Mapping Tests
+// ============================================
+
+describe("ExplainTool CLI Flag Mapping", () => {
+  test("should map pattern parameter to --pattern flag", async () => {
+    await explainTool.execute({
+      pattern: "console.log($ARG)",
+      code: "console.log('test');",
+      language: "javascript",
+    });
+
+    assertCliFlag(capturedArgs, "--pattern", "console.log($ARG)");
+  });
+
+  test("should map language parameter to --lang flag with normalization (javascript->js)", async () => {
+    await explainTool.execute({
+      pattern: "console.log($ARG)",
+      code: "console.log('test');",
+      language: "javascript",
+    });
+
+    // Reference: AST_GREP_DOCUMENTS.md line 380
+    assertCliFlag(capturedArgs, "--lang", "js");
+  });
+
+  test("should map language parameter to --lang flag with normalization (typescript->ts)", async () => {
+    await explainTool.execute({
+      pattern: "console.log($ARG)",
+      code: "console.log('test');",
+      language: "typescript",
+    });
+
+    // Reference: AST_GREP_DOCUMENTS.md line 380
+    assertCliFlag(capturedArgs, "--lang", "ts");
+  });
+
+  test("should include --json=stream flag", async () => {
+    await explainTool.execute({
+      pattern: "console.log($ARG)",
+      code: "console.log('test');",
+      language: "javascript",
+    });
+
+    // Reference: AST_GREP_DOCUMENTS.md line 405
+    assertCliFlag(capturedArgs, "--json=stream", null);
+  });
+
+  test("should include --stdin flag for inline code", async () => {
+    await explainTool.execute({
+      pattern: "console.log($ARG)",
+      code: "console.log('test');",
+      language: "javascript",
+    });
+
+    // Reference: AST_GREP_DOCUMENTS.md line 410
+    assertCliFlag(capturedArgs, "--stdin", null);
+    expect(capturedOptions?.stdin).toBe("console.log('test');");
+  });
+
+  test("should use correct command (run)", async () => {
+    await explainTool.execute({
+      pattern: "console.log($ARG)",
+      code: "console.log('test');",
+      language: "javascript",
+    });
+
+    assertCliCommand(capturedArgs, "run");
+  });
+
+  test("should maintain correct CLI flag order", async () => {
+    await explainTool.execute({
+      pattern: "console.log($ARG)",
+      code: "console.log('test');",
+      language: "javascript",
+    });
+
+    expect(capturedArgs[0]).toBe("run");
+    expect(capturedArgs[1]).toBe("--pattern");
+    expect(capturedArgs[2]).toBe("console.log($ARG)");
+    expect(capturedArgs[3]).toBe("--lang");
+    expect(capturedArgs[4]).toBe("js");
+    expect(capturedArgs[5]).toBe("--json=stream");
+    expect(capturedArgs[6]).toBe("--stdin");
+  });
+
+  test("should not include showAst in CLI flags", async () => {
+    await explainTool.execute({
+      pattern: "console.log($ARG)",
+      code: "console.log('test');",
+      language: "javascript",
+      showAst: true,
+    });
+
+    // showAst is handled internally, not passed to CLI
+    expect(capturedArgs.join(" ")).not.toContain("--show-ast");
+    expect(capturedArgs.join(" ")).not.toContain("showAst");
+  });
+
+  test("should handle default timeout in executeOptions, not CLI flags", async () => {
+    await explainTool.execute({
+      pattern: "console.log($ARG)",
+      code: "console.log('test');",
+      language: "javascript",
+    });
+
+    // Timeout is in executeOptions, not CLI args
+    expect(capturedOptions?.timeout).toBe(10000);
+    expect(capturedArgs.join(" ")).not.toContain("--timeout");
+  });
+
+  test("should handle custom timeoutMs in executeOptions", async () => {
+    await explainTool.execute({
+      pattern: "console.log($ARG)",
+      code: "console.log('test');",
+      language: "javascript",
+      timeoutMs: 15000,
+    });
+
+    // Custom timeout should be in executeOptions
+    expect(capturedOptions?.timeout).toBe(15000);
+    expect(capturedArgs.join(" ")).not.toContain("--timeout");
+    expect(capturedArgs.join(" ")).not.toContain("15000");
+  });
+
+  test("should normalize python language alias", async () => {
+    await explainTool.execute({
+      pattern: "def $NAME($PARAM): pass",
+      code: "def test(x): pass",
+      language: "python",
+    });
+
+    assertCliFlag(capturedArgs, "--lang", "py");
+  });
+
+  test("should normalize rust language alias", async () => {
+    await explainTool.execute({
+      pattern: "fn $NAME() { $$$BODY }",
+      code: "fn main() { println!(\"test\"); }",
+      language: "rust",
+    });
+
+    assertCliFlag(capturedArgs, "--lang", "rs");
+  });
+
+  test("should normalize golang language alias", async () => {
+    await explainTool.execute({
+      pattern: "func $NAME() { $$$BODY }",
+      code: "func main() { }",
+      language: "golang",
+    });
+
+    assertCliFlag(capturedArgs, "--lang", "go");
+  });
+
+  test("should normalize c++ language alias", async () => {
+    await explainTool.execute({
+      pattern: "int $NAME() { $$$BODY }",
+      code: "int main() { return 0; }",
+      language: "c++",
+    });
+
+    assertCliFlag(capturedArgs, "--lang", "cpp");
+  });
+
+  test("should normalize csharp language alias", async () => {
+    await explainTool.execute({
+      pattern: "class $NAME { $$$MEMBERS }",
+      code: "class Test { }",
+      language: "csharp",
+    });
+
+    assertCliFlag(capturedArgs, "--lang", "cs");
+  });
+
+  test("should normalize kotlin language alias", async () => {
+    await explainTool.execute({
+      pattern: "fun $NAME() { $$$BODY }",
+      code: "fun main() { }",
+      language: "kotlin",
+    });
+
+    assertCliFlag(capturedArgs, "--lang", "kt");
   });
 });

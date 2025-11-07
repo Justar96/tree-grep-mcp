@@ -17,6 +17,9 @@ interface WhereConstraint {
   metavariable: string;
   regex?: string;
   equals?: string;
+  not_regex?: string;
+  not_equals?: string;
+  kind?: string;
 }
 
 interface ScanParams {
@@ -89,7 +92,9 @@ export class ScanTool {
     }
     if (
       paramsRaw.rule !== undefined &&
-      (typeof paramsRaw.rule !== "object" || paramsRaw.rule === null || Array.isArray(paramsRaw.rule))
+      (typeof paramsRaw.rule !== "object" ||
+        paramsRaw.rule === null ||
+        Array.isArray(paramsRaw.rule))
     ) {
       throw new ValidationError("rule must be an object");
     }
@@ -143,6 +148,23 @@ export class ScanTool {
         }
         if (constraint.equals !== undefined && typeof constraint.equals !== "string") {
           throw new ValidationError(`where[${i}].equals must be a string`);
+        }
+        if (constraint.not_regex !== undefined && typeof constraint.not_regex !== "string") {
+          throw new ValidationError(`where[${i}].not_regex must be a string`);
+        }
+        if (constraint.not_equals !== undefined && typeof constraint.not_equals !== "string") {
+          throw new ValidationError(`where[${i}].not_equals must be a string`);
+        }
+        if (constraint.kind !== undefined && typeof constraint.kind !== "string") {
+          throw new ValidationError(`where[${i}].kind must be a string`);
+        }
+        
+        // Early validation for kind format if present
+        if (constraint.kind !== undefined && typeof constraint.kind === "string") {
+          const kindValidation = ParameterValidator.validateConstraintKind(constraint.kind);
+          if (!kindValidation.valid) {
+            throw new ValidationError(`where[${i}].kind: ${kindValidation.errors.join("; ")}`);
+          }
         }
       }
     }
@@ -308,6 +330,8 @@ export class ScanTool {
         "c++": "cpp",
         cpp: "cpp",
         c: "c",
+        csharp: "cs",
+        cs: "cs",
         kotlin: "kt",
         kt: "kt",
       };
@@ -356,10 +380,29 @@ export class ScanTool {
         args.push(PathValidator.normalizePath(tempCodeFile));
         tempCodeFileForCleanup = tempCodeFile;
       } else {
-        const inputPaths: string[] =
-          params.paths && Array.isArray(params.paths) && params.paths.length > 0
-            ? params.paths
-            : ["."];
+        // Only use "." as default when paths are omitted
+        const pathsProvided =
+          params.paths && Array.isArray(params.paths) && params.paths.length > 0;
+        const inputPaths: string[] = pathsProvided && params.paths ? params.paths : ["."];
+
+        // Validate that paths are absolute
+        // Only allow "." when it's the default (paths not provided by client)
+        for (const p of inputPaths) {
+          if (!path.isAbsolute(p)) {
+            if (p === "." || p === "") {
+              // "." or "" only allowed when paths were not provided (default case)
+              if (pathsProvided) {
+                throw new ValidationError(
+                  `Path must be absolute. Use '/workspace/src/' or 'C:/workspace/src/'`
+                );
+              }
+            } else {
+              throw new ValidationError(
+                `Path must be absolute. Use '/workspace/src/' or 'C:/workspace/src/'`
+              );
+            }
+          }
+        }
 
         // Normalize paths for ast-grep compatibility (Windows -> forward slashes)
         // Empty strings should be treated as current directory
@@ -457,11 +500,8 @@ export class ScanTool {
       const ruleLines = this.serializeRule(params.rule, 1);
       lines.push(...ruleLines);
 
-      // Extract metavariables from rule for constraint/fix validation
-      // This is a simplified extraction - only from top-level pattern
-      if (params.rule.pattern && typeof params.rule.pattern === "string") {
-        patternMetavars = PatternValidator.extractMetavariables(params.rule.pattern);
-      }
+      // Extract metavariables from all patterns in the rule (including nested patterns)
+      patternMetavars = this.extractAllMetavariables(params.rule);
     }
 
     // Add simple constraints if provided
@@ -476,7 +516,7 @@ export class ScanTool {
           );
         }
 
-        // Validate that constraint provides at least one operator (regex or equals)
+        // Validate that constraint provides at least one operator
         const hasRegex =
           constraint.hasOwnProperty("regex") &&
           typeof constraint.regex === "string" &&
@@ -484,20 +524,73 @@ export class ScanTool {
         const hasEquals =
           constraint.hasOwnProperty("equals") &&
           typeof constraint.equals === "string" &&
-          constraint.equals.length > 0;
+          constraint.equals.trim().length > 0;
+        const hasNotRegex =
+          constraint.hasOwnProperty("not_regex") &&
+          typeof constraint.not_regex === "string" &&
+          constraint.not_regex.trim().length > 0;
+        const hasNotEquals =
+          constraint.hasOwnProperty("not_equals") &&
+          typeof constraint.not_equals === "string" &&
+          constraint.not_equals.trim().length > 0;
+        const hasKind =
+          constraint.hasOwnProperty("kind") &&
+          typeof constraint.kind === "string" &&
+          constraint.kind.trim().length > 0;
 
-        if (!hasRegex && !hasEquals) {
+        if (!hasRegex && !hasEquals && !hasNotRegex && !hasNotEquals && !hasKind) {
           throw new ValidationError(
-            `Constraint for metavariable '${constraint.metavariable}' must specify either 'regex' or 'equals' with a non-empty value`
+            `Constraint for metavariable '${constraint.metavariable}' must specify at least one operator: regex, equals, not_regex, not_equals, or kind`
+          );
+        }
+
+        // Validate kind format early if present
+        if (hasKind && constraint.kind) {
+          const kindValidation = ParameterValidator.validateConstraintKind(constraint.kind);
+          if (!kindValidation.valid) {
+            throw new ValidationError(kindValidation.errors.join("; "));
+          }
+        }
+
+        // Enforce mutual exclusivity for positive operators (regex and equals)
+        if (hasRegex && hasEquals) {
+          throw new ValidationError(
+            `Constraint for metavariable '${constraint.metavariable}' cannot specify both 'regex' and 'equals'. Use one or the other.`
+          );
+        }
+
+        // Enforce mutual exclusivity for negative operators (not_regex and not_equals)
+        if (hasNotRegex && hasNotEquals) {
+          throw new ValidationError(
+            `Constraint for metavariable '${constraint.metavariable}' cannot specify both 'not_regex' and 'not_equals'. Use one or the other.`
           );
         }
 
         lines.push(`  ${constraint.metavariable}:`);
+        
+        // Output positive constraints (at most one due to mutual exclusivity validation)
         if (hasRegex && constraint.regex) {
           lines.push(`    regex: ${YamlValidator.escapeYamlString(constraint.regex)}`);
         } else if (hasEquals && constraint.equals) {
-          const escaped = constraint.equals.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          const trimmed = constraint.equals.trim();
+          const escaped = trimmed.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
           lines.push(`    regex: ${YamlValidator.escapeYamlString("^" + escaped + "$")}`);
+        }
+        
+        // Output negative constraints with nested not: structure (at most one due to mutual exclusivity)
+        if (hasNotRegex && constraint.not_regex) {
+          lines.push("    not:");
+          lines.push(`      regex: ${YamlValidator.escapeYamlString(constraint.not_regex)}`);
+        } else if (hasNotEquals && constraint.not_equals) {
+          const trimmed = constraint.not_equals.trim();
+          const escaped = trimmed.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          lines.push("    not:");
+          lines.push(`      regex: ${YamlValidator.escapeYamlString("^" + escaped + "$")}`);
+        }
+        
+        // Output kind constraint (can be combined with either positive or negative operator)
+        if (hasKind && constraint.kind) {
+          lines.push(`    kind: ${YamlValidator.escapeYamlString(constraint.kind)}`);
         }
       }
     }
@@ -519,6 +612,102 @@ export class ScanTool {
     }
 
     return lines.join("\n");
+  }
+
+  /**
+   * Extract all metavariables from a rule object, including nested patterns
+   *
+   * @param rule - The rule object to extract metavariables from
+   * @returns Set of all metavariables found in the rule
+   */
+  private extractAllMetavariables(rule: Rule): Set<string> {
+    const metavars = new Set<string>();
+
+    // Extract from pattern (string or object with selector)
+    if (rule.pattern !== undefined) {
+      if (typeof rule.pattern === "string") {
+        const extracted = PatternValidator.extractMetavariables(rule.pattern);
+        for (const metavar of extracted) {
+          metavars.add(metavar);
+        }
+      } else if (typeof rule.pattern === "object" && rule.pattern !== null) {
+        // Pattern object may have selector field
+        const patternObj = rule.pattern as Record<string, unknown>;
+        if (patternObj.selector && typeof patternObj.selector === "string") {
+          const extracted = PatternValidator.extractMetavariables(patternObj.selector);
+          for (const metavar of extracted) {
+            metavars.add(metavar);
+          }
+        }
+        if (patternObj.context && typeof patternObj.context === "string") {
+          const extracted = PatternValidator.extractMetavariables(patternObj.context);
+          for (const metavar of extracted) {
+            metavars.add(metavar);
+          }
+        }
+      }
+    }
+
+    // Extract from regex (may contain metavariables in capture groups, though rare)
+    // Note: ast-grep regex typically doesn't use $VAR syntax, but we check for consistency
+    if (rule.regex !== undefined && typeof rule.regex === "string") {
+      const extracted = PatternValidator.extractMetavariables(rule.regex);
+      for (const metavar of extracted) {
+        metavars.add(metavar);
+      }
+    }
+
+    // Extract from relational rules (inside, has, precedes, follows)
+    const relationalRules = [rule.inside, rule.has, rule.precedes, rule.follows];
+    for (const relRule of relationalRules) {
+      if (relRule !== undefined && typeof relRule === "object" && relRule !== null) {
+        const nested = this.extractAllMetavariables(relRule as Rule);
+        for (const metavar of nested) {
+          metavars.add(metavar);
+        }
+      }
+    }
+
+    // Extract from composite rules (all, any)
+    if (rule.all !== undefined && Array.isArray(rule.all)) {
+      for (const subRule of rule.all) {
+        if (typeof subRule === "object" && subRule !== null) {
+          const nested = this.extractAllMetavariables(subRule as Rule);
+          for (const metavar of nested) {
+            metavars.add(metavar);
+          }
+        }
+      }
+    }
+
+    if (rule.any !== undefined && Array.isArray(rule.any)) {
+      for (const subRule of rule.any) {
+        if (typeof subRule === "object" && subRule !== null) {
+          const nested = this.extractAllMetavariables(subRule as Rule);
+          for (const metavar of nested) {
+            metavars.add(metavar);
+          }
+        }
+      }
+    }
+
+    // Extract from not rule
+    if (rule.not !== undefined && typeof rule.not === "object" && rule.not !== null) {
+      const nested = this.extractAllMetavariables(rule.not as Rule);
+      for (const metavar of nested) {
+        metavars.add(metavar);
+      }
+    }
+
+    // Extract from matches (may contain metavariables in pattern strings)
+    if (rule.matches !== undefined && typeof rule.matches === "string") {
+      const extracted = PatternValidator.extractMetavariables(rule.matches);
+      for (const metavar of extracted) {
+        metavars.add(metavar);
+      }
+    }
+
+    return metavars;
   }
 
   /**
@@ -637,7 +826,8 @@ export class ScanTool {
   }
 
   /**
-   * Resolves relative file paths to absolute paths using workspace root.
+   * Resolves file paths to absolute paths.
+   * Since input paths are absolute, ast-grep returns absolute paths.
    * STDIN and empty strings are returned as-is.
    */
   private resolveFilePath(filePath: string): string {
@@ -645,8 +835,12 @@ export class ScanTool {
     if (filePath === "STDIN" || filePath === "") {
       return filePath;
     }
-    // Convert relative paths to absolute using workspace root
-    return path.resolve(this.workspaceManager.getWorkspaceRoot(), filePath);
+    // If path is already absolute, return as-is
+    if (path.isAbsolute(filePath)) {
+      return filePath;
+    }
+    // Return unchanged if not absolute (contract: ast-grep returns absolute paths when given absolute inputs)
+    return filePath;
   }
 
   private parseFindings(stdout: string): { findings: Finding[]; skippedLines: number } {
@@ -789,11 +983,30 @@ CONSTRAINT EXAMPLES:
    where: [{ metavariable: "DURATION", regex: "^[0-9]+$" }]
    Matches: timeout(5000)  |  Doesn't match: timeout(CONSTANT)
 
+4. Exclude with not_regex:
+   where: [{ metavariable: "NAME", not_regex: "^_" }]
+   Matches: const publicVar = 1  |  Doesn't match: const _privateVar = 1
+
+5. Exclude exact values with not_equals:
+   where: [{ metavariable: "METHOD", not_equals: "log" }]
+   Matches: console.error(...)  |  Doesn't match: console.log(...)
+
+6. AST node type matching with kind:
+   where: [{ metavariable: "ARG", kind: "identifier" }]
+   Matches: console.log(myVar)  |  Doesn't match: console.log("string")
+
+7. Combining constraints:
+   where: [{ metavariable: "NAME", regex: "^[a-z]", kind: "identifier" }]
+   Matches identifiers starting with lowercase letter
+
 FIX TEMPLATE EXAMPLES:
 
 1. Simple replacement: pattern="console.log($A)" fix="logger.info($A)"
 2. Reordering: pattern="assertEquals($E, $A)" fix="assertEquals($A, $E)"
 3. Adding context: pattern="throw new Error($M)" fix="throw new Error(\`[MODULE] \${$M}\`)"
+
+PATTERN LIBRARY:
+For more pattern examples, see: https://github.com/justar96/tree-grep-mcp/blob/main/PATTERN_LIBRARY.md
 
 SEVERITY LEVELS:
 • error: Critical bugs or runtime failures
@@ -826,9 +1039,10 @@ If rule execution fails, check these common issues:
    → Example: { id: "r", language: "javascript", pattern: "...", code: "..." }
 
 6. "Invalid paths"
-   → Use relative paths within workspace
+   → Use absolute paths like '/workspace/src/' or 'C:/workspace/src/'
+   → Relative paths are not supported (will be rejected with validation error)
    → Paths validated against workspace root for security
-   → Omit paths to scan entire workspace
+   → Omit paths to scan entire workspace (defaults to current directory)
 
 7. Empty scan.findings array (no matches)
    → Rule is valid but matched nothing (not an error)
@@ -860,7 +1074,7 @@ Inline Code Mode (testing):
 File Mode (scanning):
 • Use paths or omit for entire workspace
 • Language parameter REQUIRED
-• Example: { id: "r", language: "js", pattern: "var $N = $V", paths: ["src/"] }
+• Example: { id: "r", language: "js", pattern: "var $N = $V", paths: ["/workspace/src/"] }
 
 JSX/TSX Patterns:
 • Set language to 'jsx' or 'tsx'
@@ -868,9 +1082,23 @@ JSX/TSX Patterns:
 • Attribute matching: "<Button onClick={$HANDLER}>"
 • WARNING: Broad patterns like "<$TAG>" match thousands of elements - add constraints
 
+CONSTRAINT OPERATORS:
+• regex - Match with regular expression pattern
+• equals - Match exact string value
+• not_regex - Exclude matches with regular expression pattern
+• not_equals - Exclude exact string value
+• kind - Match specific AST node type (e.g., identifier, string_literal)
+
+CONSTRAINT RULES:
+• Each constraint must specify at least one operator
+• Mutually exclusive: Cannot combine 'regex' and 'equals' for same metavariable
+• Mutually exclusive: Cannot combine 'not_regex' and 'not_equals' for same metavariable
+• 'kind' can be combined with any positive or negative operator
+• Multiple constraints can target different metavariables
+• kind values must be lowercase with underscores (e.g., function_declaration)
+
 LIMITATIONS:
 • Paths must be within workspace root (security constraint)
-• Constraints support regex and equals only
 • Fix templates cannot perform complex transformations
 • Temporary YAML files created and cleaned up automatically
 
@@ -880,8 +1108,8 @@ paths → positional arguments
 code → temp file with extension
 timeoutMs → process timeout (not a CLI flag)
 
-Example: { id: "no-var", pattern: "var $N = $V", language: "js", paths: ["src/"] }
-CLI: ast-grep scan --rule <temp-rule.yml> --json=stream src/`,
+Example: { id: "no-var", pattern: "var $N = $V", language: "js", paths: ["/workspace/src/"] }
+CLI: ast-grep scan --rule <temp-rule.yml> --json=stream /workspace/src/`,
 
       inputSchema: {
         type: "object",
@@ -894,7 +1122,7 @@ CLI: ast-grep scan --rule <temp-rule.yml> --json=stream src/`,
           language: {
             type: "string",
             description:
-              "Programming language (js/ts/py/rust/go/java/cpp). Required for all rules.",
+              "Programming language (js/ts/py/rust/go/java/cpp/kotlin/csharp). Required for all rules.",
           },
           pattern: {
             type: "string",
@@ -925,17 +1153,29 @@ CLI: ast-grep scan --rule <temp-rule.yml> --json=stream src/`,
                 },
                 regex: {
                   type: "string",
-                  description: "Regex pattern to match metavariable content",
+                  description: "Regex pattern to match metavariable content. Mutually exclusive with 'equals'.",
                 },
                 equals: {
                   type: "string",
-                  description: "Exact string to match metavariable content",
+                  description: "Exact string to match metavariable content. Mutually exclusive with 'regex'.",
+                },
+                not_regex: {
+                  type: "string",
+                  description: "Exclude matches with regex pattern. Generates 'not: { regex: ... }' in YAML. Mutually exclusive with 'not_equals'.",
+                },
+                not_equals: {
+                  type: "string",
+                  description: "Exclude exact matches. Generates 'not: { regex: ^value$ }' in YAML. Mutually exclusive with 'not_regex'.",
+                },
+                kind: {
+                  type: "string",
+                  description: "Match specific AST node type (e.g., 'string_literal', 'function_declaration'). Must be lowercase with underscores. Can be combined with any positive or negative operator.",
                 },
               },
               required: ["metavariable"],
             },
             description:
-              "Constraints on pattern metavariables. Each must reference a metavariable from pattern.",
+              "Constraints on pattern metavariables. Supports: regex (match pattern), equals (exact match), not_regex (exclude pattern), not_equals (exclude exact), kind (AST node type). Constraint rules: (1) Cannot combine 'regex' and 'equals' for same metavariable. (2) Cannot combine 'not_regex' and 'not_equals' for same metavariable. (3) 'kind' can be combined with any operator. Each must reference a metavariable from pattern.",
           },
           fix: {
             type: "string",
@@ -946,7 +1186,7 @@ CLI: ast-grep scan --rule <temp-rule.yml> --json=stream src/`,
             type: "array",
             items: { type: "string" },
             description:
-              "File/directory paths to scan within workspace. Omit for entire workspace.",
+              "ABSOLUTE file/directory paths to scan within workspace (e.g., '/workspace/src/', 'C:/workspace/src/'). Relative paths NOT supported. Omit for entire workspace. Security validated.",
           },
           code: {
             type: "string",

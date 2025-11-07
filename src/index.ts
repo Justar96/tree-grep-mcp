@@ -9,6 +9,7 @@ import { WorkspaceManager } from "./core/workspace-manager.js";
 import { SearchTool } from "./tools/search.js";
 import { ReplaceTool } from "./tools/replace.js";
 import { ScanTool } from "./tools/scan.js";
+import { ExplainTool } from "./tools/explain.js";
 import { BinaryError, ValidationError, ExecutionError } from "./types/errors.js";
 // Removed complex schema imports - using simple any types now
 
@@ -24,12 +25,6 @@ function parseArgs(): InstallationOptions {
 
     if (arg === "--use-system") {
       options.useSystem = true;
-    } else if (arg === "--auto-install") {
-      options.autoInstall = true;
-    } else if (arg.startsWith("--platform=")) {
-      options.platform = arg.split("=")[1] as "win32" | "darwin" | "linux" | "auto";
-    } else if (arg.startsWith("--cache-dir=")) {
-      options.cacheDir = arg.split("=")[1];
     } else if (arg === "--help" || arg === "-h") {
       printHelp();
       process.exit(0);
@@ -38,7 +33,11 @@ function parseArgs(): InstallationOptions {
 
   // Environment variable overrides
   options.customBinaryPath = process.env.AST_GREP_BINARY_PATH;
-  options.cacheDir = options.cacheDir || process.env.AST_GREP_CACHE_DIR;
+
+  // Default to using system binary
+  if (!options.customBinaryPath) {
+    options.useSystem = true;
+  }
 
   return options;
 }
@@ -48,49 +47,35 @@ function parseArgs(): InstallationOptions {
  */
 function printHelp(): void {
   console.log(`
-tree-ast-grep MCP Server - Installation Options:
+tree-ast-grep MCP Server - Usage Guide
 
-LIGHTWEIGHT OPTIONS:
-  --use-system              Use ast-grep from system PATH (200KB package)
-  --platform=<os>          Install platform-specific binary (7MB)
-                           Options: win32, darwin, linux
-  --auto-install           Auto-detect and install for current platform (7MB)
+PREREQUISITES:
+  Install ast-grep on your system first:
+  
+  npm install -g @ast-grep/cli      # npm (recommended)
+  brew install ast-grep              # Homebrew (macOS/Linux)
+  cargo install ast-grep             # Cargo
+  scoop install ast-grep             # Scoop (Windows)
+  
+  See: https://ast-grep.github.io/guide/quick-start.html#installation
 
-CONFIGURATION:
-  --cache-dir=<path>       Custom cache directory for binaries
+USAGE:
+  npx -y @cabbages/tree-grep
+  npx -y @cabbages/tree-grep --use-system
 
 ENVIRONMENT VARIABLES:
   AST_GREP_BINARY_PATH     Path to custom ast-grep binary
-  AST_GREP_CACHE_DIR       Cache directory for downloaded binaries (recommended: use absolute path)
-  WORKSPACE_ROOT           Explicit workspace root directory
 
-EXAMPLES:
-  # Lightweight (requires system ast-grep)
-  npx -y tree-ast-grep-mcp --use-system
-
-  # Platform-specific
-  npx -y tree-ast-grep-mcp --platform=win32
-
-  # Auto-install (recommended)
-  npx -y tree-ast-grep-mcp --auto-install
-
-MCP CONFIGURATION (Recommended for Claude Desktop):
-  Add to your MCP settings with absolute cache path:
+MCP CONFIGURATION:
+  Add to your MCP settings:
   {
     "mcpServers": {
       "tree-ast-grep": {
         "command": "npx",
-        "args": ["-y", "@cabbages/tree-ast-grep-mcp", "--auto-install"],
-        "env": {
-          "WORKSPACE_ROOT": "\${workspaceFolder}",
-          "AST_GREP_CACHE_DIR": "C:\\\\Users\\\\YourUsername\\\\.ast-grep-mcp\\\\binaries"
-        }
+        "args": ["-y", "@cabbages/tree-grep"]
       }
     }
   }
-
-  Note: Replace YourUsername with your actual username.
-  macOS/Linux: use /Users/YourUsername/.ast-grep-mcp/binaries
 `);
 }
 
@@ -119,6 +104,7 @@ async function main(): Promise<void> {
     const searchTool = new SearchTool(binaryManager, workspaceManager);
     const replaceTool = new ReplaceTool(binaryManager, workspaceManager);
     const scanTool = new ScanTool(workspaceManager, binaryManager);
+    const explainTool = new ExplainTool(binaryManager, workspaceManager);
 
     // Create MCP server
     const server = new Server(
@@ -136,7 +122,7 @@ async function main(): Promise<void> {
     // List available tools
     server.setRequestHandler(ListToolsRequestSchema, async () => {
       return {
-        tools: [SearchTool.getSchema(), ReplaceTool.getSchema(), ScanTool.getSchema()],
+        tools: [SearchTool.getSchema(), ReplaceTool.getSchema(), ScanTool.getSchema(), ExplainTool.getSchema()],
       };
     });
 
@@ -174,6 +160,17 @@ async function main(): Promise<void> {
               content: [
                 { type: "text", text: scanResult.yaml },
                 { type: "text", text: `\n---\n${JSON.stringify(scanResult.scan, null, 2)}` },
+              ],
+            };
+
+          case "ast_explain_pattern":
+            const explainResult = await explainTool.execute(args as Record<string, unknown>);
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify(explainResult, null, 2),
+                },
               ],
             };
 

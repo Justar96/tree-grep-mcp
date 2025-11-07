@@ -151,6 +151,8 @@ export class ReplaceTool {
         "c++": "cpp",
         cpp: "cpp",
         c: "c",
+        csharp: "cs",
+        cs: "cs",
         kotlin: "kt",
         kt: "kt",
       };
@@ -192,10 +194,28 @@ export class ReplaceTool {
       executeOptions.stdin = params.code;
     } else {
       // File mode - add paths (default to current directory)
-      const inputPaths: string[] =
-        params.paths && Array.isArray(params.paths) && params.paths.length > 0
-          ? params.paths
-          : ["."];
+      // Only use "." as default when paths are omitted
+      const pathsProvided = params.paths && Array.isArray(params.paths) && params.paths.length > 0;
+      const inputPaths: string[] = pathsProvided && params.paths ? params.paths : ["."];
+
+      // Validate that paths are absolute
+      // Only allow "." when it's the default (paths not provided by client)
+      for (const p of inputPaths) {
+        if (!path.isAbsolute(p)) {
+          if (p === "." || p === "") {
+            // "." or "" only allowed when paths were not provided (default case)
+            if (pathsProvided) {
+              throw new ValidationError(
+                `Path must be absolute. Use '/workspace/src/' or 'C:/workspace/src/'`
+              );
+            }
+          } else {
+            throw new ValidationError(
+              `Path must be absolute. Use '/workspace/src/' or 'C:/workspace/src/'`
+            );
+          }
+        }
+      }
 
       // Normalize paths for ast-grep compatibility (Windows -> forward slashes)
       // Empty strings should be treated as current directory
@@ -234,7 +254,8 @@ export class ReplaceTool {
   }
 
   /**
-   * Resolves relative file paths to absolute paths using workspace root.
+   * Resolves file paths to absolute paths.
+   * Since input paths are absolute, ast-grep returns absolute paths.
    * STDIN and empty strings are returned as-is.
    */
   private resolveFilePath(filePath: string): string {
@@ -242,8 +263,12 @@ export class ReplaceTool {
     if (filePath === "STDIN" || filePath === "") {
       return filePath;
     }
-    // Convert relative paths to absolute using workspace root
-    return path.resolve(this.workspaceManager.getWorkspaceRoot(), filePath);
+    // If path is already absolute, return as-is
+    if (path.isAbsolute(filePath)) {
+      return filePath;
+    }
+    // Return unchanged if not absolute (contract: ast-grep returns absolute paths when given absolute inputs)
+    return filePath;
   }
 
   private parseResults(stdout: string, params: ReplaceParams, warnings?: string[]): ReplaceResult {
@@ -355,10 +380,10 @@ Preview replacement on inline code (safe, language REQUIRED):
 { "pattern": "console.log($ARG)", "replacement": "logger.info($ARG)", "code": "console.log('test');", "language": "javascript" }
 
 Preview replacement on files (safe):
-{ "pattern": "var $NAME = $VALUE", "replacement": "const $NAME = $VALUE", "paths": ["src/"], "dryRun": true }
+{ "pattern": "var $NAME = $VALUE", "replacement": "const $NAME = $VALUE", "paths": ["/workspace/src/"], "dryRun": true }
 
 Apply changes after reviewing preview:
-{ "pattern": "var $NAME = $VALUE", "replacement": "const $NAME = $VALUE", "paths": ["src/"], "dryRun": false }
+{ "pattern": "var $NAME = $VALUE", "replacement": "const $NAME = $VALUE", "paths": ["/workspace/src/"], "dryRun": false }
 
 WHEN TO USE:
 • Automated refactoring (rename functions, change APIs, update patterns)
@@ -409,6 +434,9 @@ COMMON REPLACEMENT PATTERNS:
    Pattern: "fetch($URL)"
    Replacement: "await fetch($URL)"
 
+PATTERN LIBRARY:
+For more pattern examples, see: https://github.com/justar96/tree-grep-mcp/blob/main/PATTERN_LIBRARY.md
+
 ERROR RECOVERY:
 
 If replacement fails, check these common issues:
@@ -427,8 +455,10 @@ If replacement fails, check these common issues:
    → Pattern and replacement must use same names
 
 4. "Invalid paths"
-   → Use relative paths within workspace
+   → Use absolute paths like '/workspace/src/' or 'C:/workspace/src/'
+   → Relative paths are not supported (will be rejected with validation error)
    → Paths validated against workspace root for security
+   → Omit paths to modify entire workspace (defaults to current directory)
 
 5. Warning: "Metavariable $X in pattern is not used in replacement"
    → Not an error, but may be unintentional
@@ -473,7 +503,7 @@ File Mode (for actual changes):
 • Specify paths or omit for entire workspace
 • Language optional but recommended for performance
 • ALWAYS test with dryRun=true first
-• Example: { pattern: "var $N = $V", replacement: "const $N = $V", paths: ["src/"], dryRun: true }
+• Example: { pattern: "var $N = $V", replacement: "const $N = $V", paths: ["/workspace/src/"], dryRun: true }
 
 OUTPUT STRUCTURE:
 • changes: Array of { file, matches, preview (if dryRun), applied (if not dryRun) }
@@ -497,8 +527,8 @@ dryRun: false → --update-all flag
 dryRun: true (default) → no flag (preview mode)
 timeoutMs → process timeout (not a CLI flag)
 
-Example: { pattern: "var $N = $V", replacement: "const $N = $V", paths: ["src/"], dryRun: true }
-CLI: ast-grep run --pattern "var $N = $V" --rewrite "const $N = $V" src/ (no --update-all = preview)`,
+Example: { pattern: "var $N = $V", replacement: "const $N = $V", paths: ["/workspace/src/"], dryRun: true }
+CLI: ast-grep run --pattern "var $N = $V" --rewrite "const $N = $V" /workspace/src/ (no --update-all = preview)`,
 
       inputSchema: {
         type: "object",
@@ -521,12 +551,12 @@ CLI: ast-grep run --pattern "var $N = $V" --rewrite "const $N = $V" src/ (no --u
             type: "array",
             items: { type: "string" },
             description:
-              "File/directory paths to modify within workspace. Omit for entire workspace. Security validated.",
+              "ABSOLUTE file/directory paths to modify within workspace (e.g., '/workspace/src/', 'C:/workspace/src/'). Relative paths NOT supported. Omit for entire workspace. Security validated.",
           },
           language: {
             type: "string",
             description:
-              "Programming language (js/ts/py/java/rust/go/cpp). Required for inline code, recommended for paths.",
+              "Programming language (js/ts/py/java/rust/go/cpp/kotlin/csharp). Required for inline code, recommended for paths.",
           },
           dryRun: {
             type: "boolean",

@@ -4,6 +4,8 @@ import * as os from "os";
 import { execFile, spawn } from "child_process";
 import { promisify } from "util";
 import { BinaryError, InstallationOptions } from "../types/errors.js";
+import { inflateRawSync } from "zlib";
+import { PathValidator } from "../utils/validation.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -39,14 +41,19 @@ export class AstGrepBinaryManager {
     if (process.platform === "win32") {
       const userProfile = process.env.USERPROFILE;
       if (userProfile && path.isAbsolute(userProfile)) {
-        return path.join(userProfile, ".ast-grep-mcp", "binaries");
+        // Note: path.join() returns platform-native separators (backslashes on Windows).
+        // These paths are used with Node.js fs methods which accept both separators.
+        // Normalization to forward slashes is NOT needed here - only when passing to ast-grep CLI.
+        return PathValidator.normalizePath(path.join(userProfile, ".ast-grep-mcp", "binaries"));
       }
     }
 
     // On Unix-like systems, use HOME or fall back to os.homedir()
     const home = process.env.HOME || os.homedir();
     if (home && path.isAbsolute(home)) {
-      return path.join(home, ".ast-grep-mcp", "binaries");
+      // Note: path.join() returns forward slashes on Unix.
+      // No normalization needed for fs operations.
+      return PathValidator.normalizePath(path.join(home, ".ast-grep-mcp", "binaries"));
     }
 
     // Last resort: use a temp directory
@@ -54,7 +61,7 @@ export class AstGrepBinaryManager {
     console.error(
       `Warning: Could not determine user home directory, using temp directory: ${tempDir}`
     );
-    return path.join(tempDir, ".ast-grep-mcp", "binaries");
+    return PathValidator.normalizePath(path.join(tempDir, ".ast-grep-mcp", "binaries"));
   }
 
   private async extractBinaryVersion(binaryPath: string): Promise<string | null> {
@@ -137,19 +144,7 @@ export class AstGrepBinaryManager {
       return;
     }
 
-    // 2. System binary (if requested)
-    if (this.options.useSystem) {
-      await this.useSystemBinary();
-      return;
-    }
-
-    // 3. Platform-specific or auto-install
-    if (this.options.autoInstall || this.options.platform) {
-      await this.installPlatformBinary();
-      return;
-    }
-
-    // 4. Fallback to system binary
+    // 2. System binary (default)
     await this.useSystemBinary();
   }
 
@@ -179,19 +174,22 @@ export class AstGrepBinaryManager {
       console.error(`Using system binary: ${systemPath} (version: ${version ?? "unknown"})`);
     } else {
       throw new BinaryError(
-        "ast-grep not found in PATH. Install from official sources (see https://ast-grep.github.io/guide/quick-start.html) or use --auto-install."
+        "ast-grep not found in PATH. Please install ast-grep using one of the official methods:\n" +
+          "  npm install -g @ast-grep/cli\n" +
+          "  brew install ast-grep\n" +
+          "  cargo install ast-grep\n" +
+          "  scoop install ast-grep\n" +
+          "See: https://ast-grep.github.io/guide/quick-start.html#installation"
       );
     }
   }
 
   /**
    * Download and cache a platform specific ast-grep binary when requested.
+   * @deprecated This method is no longer used as auto-install has been removed.
    */
   private async installPlatformBinary(): Promise<void> {
-    const platform =
-      this.options.platform === "auto"
-        ? process.platform
-        : this.options.platform || process.platform;
+    const platform = process.platform;
     const arch = process.arch;
     const totalStages = 4;
 
@@ -211,21 +209,29 @@ export class AstGrepBinaryManager {
       return;
     }
 
-    const cacheDir = this.options.cacheDir || this.getDefaultCacheDir();
+    // Internal path handling: Cache directory paths use platform-native separators.
+    // Node.js fs methods accept both forward and backslashes on Windows.
+    // Normalization is only needed when passing paths to ast-grep CLI.
+    const cacheDir = this.getDefaultCacheDir();
 
     const binaryName = this.getBinaryName(platform, arch);
-    const binaryPath = path.join(cacheDir, binaryName);
+    const binaryPath = PathValidator.normalizePath(path.join(cacheDir, binaryName));
+    const resolvedBinaryPath = await this.resolveExistingBinary(binaryPath, platform);
 
-    this.logStage(1, totalStages, `Checking cached binary at ${binaryPath}...`);
+    this.logStage(
+      1,
+      totalStages,
+      `Checking cached binary at ${(resolvedBinaryPath ?? binaryPath)}...`
+    );
 
     // Check if binary exists in cache and is valid
-    if (await this.fileExists(binaryPath)) {
+    if (resolvedBinaryPath) {
       const expectedVersionForCache =
         (await this.fetchLatestGitHubVersion()) ?? AstGrepBinaryManager.HARDCODED_VERSION;
       let cacheValidated = false;
 
       for (let attempt = 1; attempt <= AstGrepBinaryManager.CACHE_VALIDATION_RETRIES; attempt++) {
-        if (await this.testBinary(binaryPath, expectedVersionForCache)) {
+        if (await this.testBinary(resolvedBinaryPath, expectedVersionForCache)) {
           cacheValidated = true;
           break;
         }
@@ -241,9 +247,11 @@ export class AstGrepBinaryManager {
       }
 
       if (cacheValidated) {
-        const version = await this.extractBinaryVersion(binaryPath);
-        console.error(`Using cached binary: ${binaryPath} (version: ${version ?? "unknown"})`);
-        this.binaryPath = binaryPath;
+        const version = await this.extractBinaryVersion(resolvedBinaryPath);
+        console.error(
+          `Using cached binary: ${resolvedBinaryPath} (version: ${version ?? "unknown"})`
+        );
+        this.binaryPath = resolvedBinaryPath;
         this.isInitialized = true;
         this.logStage(4, totalStages, "Installation complete");
         return;
@@ -256,6 +264,19 @@ export class AstGrepBinaryManager {
         await fs.unlink(binaryPath);
       } catch {
         // Ignore cleanup errors
+      }
+
+      try {
+        await fs.unlink(resolvedBinaryPath);
+      } catch {
+        // Ignore cleanup errors
+      }
+      if (resolvedBinaryPath !== binaryPath) {
+        try {
+          await fs.unlink(binaryPath);
+        } catch {
+          // Ignore cleanup errors
+        }
       }
     }
 
@@ -361,6 +382,37 @@ export class AstGrepBinaryManager {
   }
 
   /**
+   * Resolve existing cached binary path, handling Windows script wrappers.
+   */
+  private async resolveExistingBinary(binaryPath: string, platform: string): Promise<string | null> {
+    if (await this.fileExists(binaryPath)) {
+      return binaryPath;
+    }
+
+    if (platform === "win32") {
+      const baseWithoutExe = binaryPath.replace(/\.exe$/i, "");
+      const candidatePaths = [
+        `${baseWithoutExe}.cmd`,
+        `${binaryPath}.cmd`,
+        `${baseWithoutExe}.ps1`,
+        `${binaryPath}.ps1`,
+        path.join(path.dirname(binaryPath), "ast-grep.exe"),
+        path.join(path.dirname(binaryPath), "ast-grep.cmd"),
+        path.join(path.dirname(binaryPath), "ast-grep.ps1"),
+      ];
+
+      for (const candidateRaw of candidatePaths) {
+        const candidate = PathValidator.normalizePath(candidateRaw);
+        if (await this.fileExists(candidate)) {
+          return candidate;
+        }
+      }
+    }
+
+    return null;
+  }
+
+  /**
    * Build the expected ast-grep file name for the given platform and architecture.
    */
   private getBinaryName(platform: string, arch: string): string {
@@ -395,8 +447,13 @@ export class AstGrepBinaryManager {
     }
 
     const downloadUrl = `${baseUrl}/${fileName}`;
-    const tempZipPath = targetPath + ".zip";
+    // Temp file path: Uses platform-native separators for fs operations.
+    // Node.js fs methods (fs.open, fs.unlink) accept both separators on Windows.
+    // No normalization needed for internal file operations.
+    const tempZipPath = PathValidator.normalizePath(targetPath + ".zip");
 
+    // Create cache directory with platform-native path.
+    // path.dirname() preserves separator type from input path.
     // Ensure cache directory exists
     await fs.mkdir(path.dirname(targetPath), { recursive: true });
 
@@ -408,23 +465,27 @@ export class AstGrepBinaryManager {
 
       console.error("Extracting binary from archive...");
       // Extract binary from zip
-      await this.extractBinary(tempZipPath, targetPath, platform);
+      await this.extractBinary(tempZipPath, PathValidator.normalizePath(targetPath), platform);
 
       console.error("Validating binary version...");
-      if (!(await this.testBinary(targetPath, releaseVersion))) {
-        const actualVersion = await this.extractBinaryVersion(targetPath);
+      if (!(await this.testBinary(PathValidator.normalizePath(targetPath), releaseVersion))) {
+        const actualVersion = await this.extractBinaryVersion(
+          PathValidator.normalizePath(targetPath)
+        );
         throw new BinaryError(
           `Downloaded binary version mismatch. Expected v${releaseVersion}, found ${actualVersion ?? "unknown"}. This may indicate a corrupted download.`
         );
       }
 
-      const validatedVersion = (await this.extractBinaryVersion(targetPath)) ?? releaseVersion;
+      const validatedVersion =
+        (await this.extractBinaryVersion(PathValidator.normalizePath(targetPath))) ??
+        releaseVersion;
       console.error(`Binary version validated: v${validatedVersion}`);
       console.error(`Successfully installed ast-grep v${validatedVersion}`);
 
       // Set executable permissions on Unix systems
       if (platform !== "win32") {
-        await fs.chmod(targetPath, "755");
+        await fs.chmod(PathValidator.normalizePath(targetPath), "755");
       }
 
       try {
@@ -457,6 +518,31 @@ export class AstGrepBinaryManager {
           "Official installation methods ensure version compatibility and receive automatic updates."
       );
     }
+  }
+
+  /**
+   * Attempt to reuse an existing cached binary without triggering downloads.
+   * @deprecated This method is no longer used as auto-install has been removed.
+   */
+  private async tryUseCachedBinary(platform: string, arch: string): Promise<boolean> {
+    const cacheDir = this.getDefaultCacheDir();
+    const binaryName = this.getBinaryName(platform, arch);
+    const binaryPath = PathValidator.normalizePath(path.join(cacheDir, binaryName));
+    const resolvedBinaryPath = await this.resolveExistingBinary(binaryPath, platform);
+
+    if (!resolvedBinaryPath) {
+      return false;
+    }
+
+    if (!(await this.testBinary(resolvedBinaryPath))) {
+      return false;
+    }
+
+    this.binaryPath = resolvedBinaryPath;
+    this.isInitialized = true;
+    const version = await this.extractBinaryVersion(resolvedBinaryPath);
+    console.error(`Using cached binary: ${resolvedBinaryPath} (version: ${version ?? "unknown"})`);
+    return true;
   }
 
   /**
@@ -549,16 +635,87 @@ export class AstGrepBinaryManager {
     platform: string
   ): Promise<void> {
     try {
+      // Extraction directory: Uses platform-native separators.
+      // All fs operations (mkdir, readdir, rename, rm) accept both separators on Windows.
       const extractDir = path.join(path.dirname(targetPath), "extract");
       await fs.mkdir(extractDir, { recursive: true });
 
       if (platform === "win32") {
-        // Use PowerShell on Windows
-        await execFileAsync(
-          "powershell",
-          ["-Command", `Expand-Archive -Path "${zipPath}" -DestinationPath "${extractDir}" -Force`],
-          { timeout: 30000 }
-        );
+        const sanitizeForPowerShell = (value: string): string => value.replace(/"/g, '""');
+        const extractionScript = `Expand-Archive -Path "${sanitizeForPowerShell(zipPath)}" -DestinationPath "${sanitizeForPowerShell(extractDir)}" -Force`;
+        const powerShellCandidates = ["powershell.exe", "powershell", "pwsh.exe", "pwsh"];
+        const describeError = (error: unknown): string => {
+          const err = error as NodeJS.ErrnoException & { stderr?: string };
+          if (err?.stderr) {
+            return err.stderr.toString();
+          }
+          if (err?.message) {
+            return err.message;
+          }
+          return String(error);
+        };
+
+        let extracted = false;
+        let manualError: unknown = null;
+        let tarError: unknown = null;
+        let lastPowerShellError: unknown = null;
+
+        try {
+          await this.extractZipManually(zipPath, extractDir);
+          extracted = true;
+        } catch (error) {
+          manualError = error;
+        }
+
+        if (!extracted) {
+          try {
+            await execFileAsync(
+              "tar",
+              ["-xf", zipPath, "--force-local", "-C", extractDir],
+              { timeout: 30000 }
+            );
+            extracted = true;
+          } catch (error) {
+            tarError = error;
+          }
+        }
+
+        if (!extracted) {
+          for (const command of powerShellCandidates) {
+            try {
+              await execFileAsync(
+                command,
+                ["-NoLogo", "-NoProfile", "-Command", extractionScript],
+                { timeout: 30000 }
+              );
+              extracted = true;
+              break;
+            } catch (error) {
+              lastPowerShellError = error;
+              const err = error as NodeJS.ErrnoException & { stderr?: string };
+              if (err.code === "ENOENT") {
+                continue;
+              }
+              throw new Error(`Failed to extract with ${command}: ${describeError(error)}`);
+            }
+          }
+        }
+
+        if (!extracted) {
+          const messages: string[] = [];
+          if (manualError) {
+            messages.push(`Manual extraction failed: ${describeError(manualError)}`);
+          }
+          if (tarError) {
+            messages.push(`tar failed: ${describeError(tarError)}`);
+          }
+          if (lastPowerShellError) {
+            messages.push(`PowerShell failed: ${describeError(lastPowerShellError)}`);
+          } else {
+            messages.push("PowerShell executable not found on PATH.");
+          }
+          throw new Error(messages.join(" "));
+        }
       } else {
         // Check if unzip is available, fallback to manual extraction
         try {
@@ -594,6 +751,75 @@ export class AstGrepBinaryManager {
   }
 
   /**
+   * Extract zip archive contents using pure JavaScript when platform tools are unavailable.
+   */
+  private async extractZipManually(zipPath: string, extractDir: string): Promise<void> {
+    const data = await fs.readFile(zipPath);
+    const eocdSignature = Buffer.from([0x50, 0x4b, 0x05, 0x06]);
+    const eocdOffset = data.lastIndexOf(eocdSignature);
+    if (eocdOffset === -1) {
+      throw new Error("End of central directory signature not found");
+    }
+
+    const totalEntries = data.readUInt16LE(eocdOffset + 10);
+    const centralDirectoryOffset = data.readUInt32LE(eocdOffset + 16);
+
+    let offset = centralDirectoryOffset;
+
+    for (let index = 0; index < totalEntries; index++) {
+      const signature = data.readUInt32LE(offset);
+      if (signature !== 0x02014b50) {
+        throw new Error("Invalid central directory file header signature");
+      }
+
+      const compressionMethod = data.readUInt16LE(offset + 10);
+      const compressedSize = data.readUInt32LE(offset + 20);
+      const fileNameLength = data.readUInt16LE(offset + 28);
+      const extraFieldLength = data.readUInt16LE(offset + 30);
+      const commentLength = data.readUInt16LE(offset + 32);
+      const localHeaderOffset = data.readUInt32LE(offset + 42);
+
+      const fileNameStart = offset + 46;
+      const fileNameEnd = fileNameStart + fileNameLength;
+      const rawName = data.subarray(fileNameStart, fileNameEnd).toString("utf8");
+      const normalizedName = rawName.replace(/\\/g, "/");
+
+      offset = fileNameEnd + extraFieldLength + commentLength;
+
+      if (!normalizedName || normalizedName.endsWith("/")) {
+        await fs.mkdir(path.join(extractDir, normalizedName), { recursive: true });
+        continue;
+      }
+
+      const localHeaderSignature = data.readUInt32LE(localHeaderOffset);
+      if (localHeaderSignature !== 0x04034b50) {
+        throw new Error(`Invalid local file header signature for ${normalizedName}`);
+      }
+
+      const localFileNameLength = data.readUInt16LE(localHeaderOffset + 26);
+      const localExtraLength = data.readUInt16LE(localHeaderOffset + 28);
+      const dataStart = localHeaderOffset + 30 + localFileNameLength + localExtraLength;
+      const compressedData = data.subarray(dataStart, dataStart + compressedSize);
+
+      let fileBuffer: Buffer;
+      if (compressionMethod === 0) {
+        fileBuffer = Buffer.from(compressedData);
+      } else if (compressionMethod === 8) {
+        fileBuffer = inflateRawSync(compressedData);
+      } else {
+        throw new Error(
+          `Unsupported compression method ${compressionMethod} for ${normalizedName}`
+        );
+      }
+
+      const outputPath = path.join(extractDir, normalizedName);
+      console.error(`[ManualExtract] writing ${outputPath}`);
+      await fs.mkdir(path.dirname(outputPath), { recursive: true });
+      await fs.writeFile(outputPath, fileBuffer);
+    }
+  }
+
+  /**
    * Walk a directory tree and collect file paths for archive extraction.
    */
   private async findFilesRecursively(dir: string): Promise<string[]> {
@@ -622,6 +848,9 @@ export class AstGrepBinaryManager {
    * Remove temporary files created during download or extraction.
    */
   private async cleanup(paths: string[]): Promise<void> {
+    // Cleanup: fs.unlink() accepts both forward and backslashes on Windows.
+    // No path normalization needed for file deletion.
+    // Paths can be in platform-native format or normalized format.
     for (const filePath of paths) {
       try {
         await fs.unlink(filePath);
@@ -652,6 +881,9 @@ export class AstGrepBinaryManager {
     const cwd = options.cwd || process.cwd();
     const timeout = options.timeout || 30000;
 
+    // Binary path execution: this.binaryPath may contain platform-native separators.
+    // getExecutionCommand() handles .ps1, .cmd, and .exe files correctly on Windows.
+    // Path normalization is NOT needed for binary execution - only for arguments passed to ast-grep.
     // Determine the command and arguments based on file type
     const { command, commandArgs } = this.getExecutionCommand(this.binaryPath, args);
 
@@ -720,7 +952,8 @@ export class AstGrepBinaryManager {
       const result = await execFileAsync(command, commandArgs, {
         cwd,
         timeout,
-        maxBuffer: 1024 * 1024 * 10,
+        // Allow large JSON stream output without tripping Node's buffer limit.
+        maxBuffer: 1024 * 1024 * 128,
       });
       return { stdout: result.stdout, stderr: result.stderr };
     } catch (error: unknown) {

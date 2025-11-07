@@ -6,28 +6,38 @@ A Model Context Protocol server that provides structural code search and transfo
 
 ## Installation
 
-Add to your MCP settings configuration:
+**Step 1: Install ast-grep**
+
+This MCP server requires ast-grep to be installed on your system. Choose one of the following methods:
+
+```bash
+# Using npm (recommended)
+npm install -g @ast-grep/cli
+
+# Using Homebrew (macOS/Linux)
+brew install ast-grep
+
+# Using Cargo
+cargo install ast-grep
+
+# Using Scoop (Windows)
+scoop install ast-grep
+```
+
+For more installation options, see the [official ast-grep installation guide](https://ast-grep.github.io/guide/quick-start.html#installation).
+
+**Step 2: Add to your MCP settings configuration**
 
 ```json
 {
   "mcpServers": {
     "tree-ast-grep": {
       "command": "npx",
-      "args": ["-y", "@cabbages/tree-grep", "--auto-install"],
-      "env": {
-        "WORKSPACE_ROOT": "${workspaceFolder}",
-        "AST_GREP_CACHE_DIR": "C:\\Users\\YourUsername\\.ast-grep-mcp\\binaries"
-      }
+      "args": ["-y", "@cabbages/tree-grep"]
     }
   }
 }
 ```
-
-**Important Configuration Notes:**
-- `WORKSPACE_ROOT`: Ensures the server uses your project directory as the base for resolving relative paths. Without it, the server may detect the wrong workspace root.
-- `AST_GREP_CACHE_DIR`: **Recommended for Claude Desktop and other AI agent environments.** Use an absolute path to avoid path resolution issues. Replace `C:\\Users\\YourUsername` with your actual user directory.
-  - Windows: `C:\\Users\\YourUsername\\.ast-grep-mcp\\binaries`
-  - macOS/Linux: `/Users/YourUsername/.ast-grep-mcp/binaries` or `/home/username/.ast-grep-mcp/binaries`
 
 ## Tools
 
@@ -159,28 +169,24 @@ var $NAME = $VALUE                         // Matches: var x = 5
 function $NAME($$$PARAMS) { $$$BODY }      // Matches: function add(a, b) { return a + b; }
 ```
 
+For more pattern examples across multiple languages, see the [Pattern Library](PATTERN_LIBRARY.md).
+
 ## Configuration Options
 
 The server supports these command-line flags:
 
 ```bash
-# Use system-installed ast-grep
-npx @cabbages/tree-grep --use-system
+# Use system-installed ast-grep (recommended)
+npx -y @cabbages/tree-grep
 
-# Auto-install platform-specific binary (recommended)
-npx @cabbages/tree-grep --auto-install
-
-# Specify platform manually
-npx @cabbages/tree-grep --platform=darwin-arm64
+# Use system-installed ast-grep (explicit flag)
+npx -y @cabbages/tree-grep --use-system
 ```
 
-**Supported platforms:**
-- `darwin-x64` (macOS Intel)
-- `darwin-arm64` (macOS Apple Silicon)
-- `linux-x64` (Linux x86_64)
-- `linux-arm64` (Linux ARM64)
-- `win32-x64` (Windows x64)
-- `win32-arm64` (Windows ARM64)
+**Environment Variables:**
+- `AST_GREP_BINARY_PATH`: Path to custom ast-grep binary (if not using system installation)
+
+**Note:** The `--use-system` flag is now the default behavior. The server will use the ast-grep binary from your system PATH.
 
 ## Workspace Detection
 
@@ -189,8 +195,6 @@ The server automatically detects project boundaries by searching for:
 **Primary indicators:** `.git`, `package.json`, `Cargo.toml`, `go.mod`, `pom.xml`
 **Secondary indicators:** `pyproject.toml`, `composer.json`, `build.gradle`, `tsconfig.json`
 **Tertiary indicators:** `Makefile`, `README.md`, `.vscode`, `.idea`, `Gemfile`
-
-Override with `WORKSPACE_ROOT` environment variable.
 
 ## Security
 
@@ -203,25 +207,22 @@ All file paths are validated to prevent access outside the workspace:
 
 ## Troubleshooting
 
-### "ast-grep binary not found" error in Claude Desktop
+### "ast-grep binary not found" error
 
-If you see an error like `ast-grep binary not found at C:\Users\username.ast-grep-mcp\binaries\...` (note the missing backslash), this is caused by environment variable conflicts with workspace settings.
+If you see an error about ast-grep not being found, make sure you have installed ast-grep on your system:
 
-**Solution:** Set an explicit cache directory using an absolute path in your MCP configuration:
+```bash
+# Verify ast-grep is installed
+ast-grep --version
 
-```json
-{
-  "mcpServers": {
-    "tree-ast-grep": {
-      "env": {
-        "AST_GREP_CACHE_DIR": "C:\\Users\\YourUsername\\.ast-grep-mcp\\binaries"
-      }
-    }
-  }
-}
+# If not installed, use one of these methods:
+npm install -g @ast-grep/cli        # npm
+brew install ast-grep                # Homebrew
+cargo install ast-grep               # Cargo
+scoop install ast-grep               # Scoop (Windows)
 ```
 
-Replace `YourUsername` with your actual Windows username. On macOS/Linux, use `/Users/YourUsername/.ast-grep-mcp/binaries` or `/home/username/.ast-grep-mcp/binaries`.
+For more installation options, see the [official ast-grep installation guide](https://ast-grep.github.io/guide/quick-start.html#installation).
 
 ## Development
 
@@ -315,7 +316,7 @@ bun run test:binary-manager:coverage # Collect coverage numbers
   - `TEST_SKIP_NETWORK=1` – skips download tests when network access is unavailable
   - `TEST_BINARY_CACHE_DIR=<path>` – points binary cache at a custom directory for CI or reproducible runs
   - `INTEGRATION_TESTS=1` – forces integration tests in CI pipelines (fails if ast-grep missing)
-- **Requirements**: Integration and binary manager tests require a working ast-grep CLI (install manually or pass `--auto-install`)
+- **Requirements**: Integration and binary manager tests require ast-grep to be installed on your system (see Installation section)
 
 ### Run All Tests
 
@@ -328,7 +329,7 @@ bun run test:unit                     # Run only unit tests (validation, binary 
 ## Requirements
 
 - Node.js >= 18.0.0 or Bun >= 1.0.0
-- ast-grep binary (auto-installed with `--auto-install` flag)
+- ast-grep installed on your system (see Installation section)
 
 ## License
 
