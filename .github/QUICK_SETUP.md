@@ -58,7 +58,7 @@ Wait ~5 minutes, then check:
 npm view @cabbages/tree-grep
 
 # Test installation
-npx @cabbages/tree-grep --version
+npx -y @cabbages/tree-grep --version
 
 # Check GitHub
 # Visit: https://github.com/justar96/tree-grep-mcp/releases

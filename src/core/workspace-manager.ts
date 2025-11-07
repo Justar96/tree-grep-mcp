@@ -1,8 +1,7 @@
-import * as fs from 'fs/promises';
-import * as fsSync from 'fs';
-import * as path from 'path';
-import { SecurityError } from '../types/errors.js';
-import { PathValidator } from '../utils/validation.js';
+import * as fs from "fs/promises";
+import * as fsSync from "fs";
+import * as path from "path";
+import { PathValidator } from "../utils/validation.js";
 
 export interface WorkspaceConfig {
   root: string;
@@ -41,7 +40,7 @@ export class WorkspaceManager {
       root: workspaceRoot,
       allowedPaths: [],
       blockedPaths: this.getBlockedPaths(),
-      maxDepth: 10,
+      maxDepth: 6,
     };
   }
 
@@ -54,14 +53,16 @@ export class WorkspaceManager {
     }
 
     let currentDir = process.cwd();
-    console.error(`Starting workspace detection from: ${currentDir}`);
 
     // Enhanced root indicators with priority ordering
-    const primaryIndicators = ['.git', 'package.json', 'Cargo.toml', 'go.mod', 'pom.xml'];
-    const secondaryIndicators = ['pyproject.toml', 'composer.json', 'build.gradle', 'tsconfig.json'];
-    const tertiaryIndicators = ['Makefile', 'README.md', '.vscode', '.idea', 'Gemfile'];
-
-    const allIndicators = [...primaryIndicators, ...secondaryIndicators, ...tertiaryIndicators];
+    const primaryIndicators = [".git", "package.json", "Cargo.toml", "go.mod", "pom.xml"];
+    const secondaryIndicators = [
+      "pyproject.toml",
+      "composer.json",
+      "build.gradle",
+      "tsconfig.json",
+    ];
+    const tertiaryIndicators = ["Makefile", "README.md", ".vscode", ".idea", "Gemfile"];
 
     // Enhanced detection with validation - increased search depth to 8 levels
     for (let depth = 0; depth <= 8; depth++) {
@@ -69,8 +70,8 @@ export class WorkspaceManager {
       for (const indicator of primaryIndicators) {
         try {
           fsSync.accessSync(path.join(currentDir, indicator));
-          if (this.validateWorkspaceRoot(currentDir)) {
-            console.error(`Found primary workspace indicator '${indicator}' in: ${currentDir}`);
+          // Primary indicators are strong signals - validate but don't require code structure
+          if (this.validateWorkspaceRoot(currentDir, true)) {
             return currentDir;
           }
         } catch {
@@ -82,8 +83,8 @@ export class WorkspaceManager {
       for (const indicator of secondaryIndicators) {
         try {
           fsSync.accessSync(path.join(currentDir, indicator));
-          if (this.validateWorkspaceRoot(currentDir)) {
-            console.error(`Found secondary workspace indicator '${indicator}' in: ${currentDir}`);
+          // Secondary indicators are also strong signals
+          if (this.validateWorkspaceRoot(currentDir, true)) {
             return currentDir;
           }
         } catch {
@@ -92,12 +93,13 @@ export class WorkspaceManager {
       }
 
       // Try tertiary indicators as last resort
-      if (depth >= 2) { // Only check tertiary after going up a bit
+      if (depth >= 2) {
+        // Only check tertiary after going up a bit
         for (const indicator of tertiaryIndicators) {
           try {
             fsSync.accessSync(path.join(currentDir, indicator));
-            if (this.validateWorkspaceRoot(currentDir)) {
-              console.error(`Found tertiary workspace indicator '${indicator}' in: ${currentDir}`);
+            // Tertiary indicators require code structure validation
+            if (this.validateWorkspaceRoot(currentDir, false)) {
               return currentDir;
             }
           } catch {
@@ -119,9 +121,8 @@ export class WorkspaceManager {
         if (entry.isDirectory()) {
           const candidate = path.join(currentDir, entry.name);
           try {
-            fsSync.accessSync(path.join(candidate, 'package.json'));
-            fsSync.accessSync(path.join(candidate, 'src'));
-            console.error(`Using nested project directory as workspace root: ${candidate}`);
+            fsSync.accessSync(path.join(candidate, "package.json"));
+            fsSync.accessSync(path.join(candidate, "src"));
             return candidate;
           } catch {
             // Not a project directory
@@ -130,19 +131,48 @@ export class WorkspaceManager {
       }
     } catch {}
 
-    // Enhanced fallback: use current directory with validation
+    // Fallback with warning: use current directory but require explicit paths
     const fallback = process.cwd();
-    console.error(`No workspace indicators found, using current directory: ${fallback}`);
+    console.error(
+      `WARNING: No workspace root detected. Current directory "${fallback}" lacks project indicators (.git, package.json, etc.). ` +
+        `All operations will require explicit absolute paths. Set WORKSPACE_ROOT environment variable for better workspace detection.`
+    );
     return fallback;
   }
 
-  private validateWorkspaceRoot(rootPath: string): boolean {
+  private validateWorkspaceRoot(rootPath: string, hasStrongIndicator = false): boolean {
     try {
+      // Reject common user home directories
+      const home = process.env.HOME || process.env.USERPROFILE || "";
+      if (home && path.resolve(rootPath) === path.resolve(home)) {
+        return false; // Never use home directory as workspace root
+      }
+
+      // Reject if path contains common user directory names
+      const normalizedPath = rootPath.toLowerCase();
+      const userDirPatterns = [
+        /[/\\]downloads[/\\]?$/i,
+        /[/\\]documents[/\\]?$/i,
+        /[/\\]desktop[/\\]?$/i,
+        /[/\\]pictures[/\\]?$/i,
+        /[/\\]videos[/\\]?$/i,
+        /[/\\]music[/\\]?$/i,
+      ];
+      if (userDirPatterns.some((pattern) => pattern.test(normalizedPath))) {
+        return false;
+      }
+
+      // If we have a strong indicator (like .git or package.json), trust it
+      // and skip the code structure check
+      if (hasStrongIndicator) {
+        return true;
+      }
+
       const entries = fsSync.readdirSync(rootPath);
 
       // Check for presence of source code files or directories
-      const codeIndicators = ['src', 'lib', 'app', 'components', 'modules', 'source', 'Sources'];
-      const hasCodeStructure = entries.some(entry => {
+      const codeIndicators = ["src", "lib", "app", "components", "modules", "source", "Sources"];
+      const hasCodeStructure = entries.some((entry) => {
         try {
           const entryPath = path.join(rootPath, entry);
           const stat = fsSync.statSync(entryPath);
@@ -167,16 +197,41 @@ export class WorkspaceManager {
   }
 
   private getBlockedPaths(): string[] {
+    const home = process.env.HOME || process.env.USERPROFILE || "";
     const systemPaths = [
-      '/etc', '/bin', '/usr', '/sys', '/proc',           // Unix system dirs
-      'C:\\Windows', 'C:\\Program Files',               // Windows system dirs
-      path.join(process.env.HOME || '', '.ssh'),        // SSH keys
-      path.join(process.env.HOME || '', '.aws'),        // AWS credentials
-      'node_modules/.bin',                              // Binary executables
-      '.git',                                           // Git internal files
+      // Unix system directories
+      "/etc",
+      "/bin",
+      "/usr",
+      "/sys",
+      "/proc",
+      // Windows system directories
+      "C:\\Windows",
+      "C:\\Program Files",
+      "C:\\Program Files (x86)",
+      // Sensitive user directories
+      path.join(home, ".ssh"),
+      path.join(home, ".aws"),
+      path.join(home, ".gnupg"),
+      // Common user directories that shouldn't be scanned
+      path.join(home, "Downloads"),
+      path.join(home, "Documents"),
+      path.join(home, "Desktop"),
+      path.join(home, "Pictures"),
+      path.join(home, "Videos"),
+      path.join(home, "Music"),
+      // Language-specific cache/module directories
+      path.join(home, "go", "pkg"),
+      path.join(home, ".cargo"),
+      path.join(home, ".rustup"),
+      path.join(home, ".npm"),
+      path.join(home, ".cache"),
+      // Build artifacts and dependencies
+      "node_modules/.bin",
+      ".git",
     ];
 
-    return systemPaths.map(p => path.resolve(p));
+    return systemPaths.map((p) => path.resolve(p)).filter((p) => p !== path.resolve(""));
   }
 
   getConfig(): WorkspaceConfig {
@@ -192,80 +247,86 @@ export class WorkspaceManager {
 
   validatePath(inputPath: string): { valid: boolean; resolvedPath: string; error?: string } {
     try {
-      // Check for Windows absolute paths on non-Windows platforms
-      if (PathValidator.isWindowsAbsolutePath(inputPath) && process.platform !== 'win32') {
+      // Step 1: Check if path is absolute - reject relative paths immediately
+      if (!PathValidator.isAbsolutePath(inputPath)) {
         return {
           valid: false,
           resolvedPath: inputPath,
-          error: `Windows absolute path "${inputPath}" is not supported on non-Windows platforms. Use relative paths or POSIX absolute paths.`
+          error: `Path must be absolute: "${inputPath}". Relative paths are not supported. Use absolute paths like "/workspace/src/" or "C:/workspace/src/"`,
         };
       }
 
-      // Normalize Windows paths to forward slashes for ast-grep compatibility
-      const normalizedInput = PathValidator.normalizePath(inputPath);
-
-      // Resolve the path relative to workspace root (using native separators for validation)
-      const resolvedPath = path.resolve(this.config.root, normalizedInput);
-      const normalizedRoot = path.resolve(this.config.root);
-      const relativeFromRoot = path.relative(normalizedRoot, resolvedPath);
-
-      // Ensure the resolved path is within the workspace root
-      if (
-        relativeFromRoot === '' ||
-        relativeFromRoot === '.'
-      ) {
-        // resolvedPath is the root itself; allow
-      } else if (
-        relativeFromRoot.startsWith('..' + path.sep) ||
-        relativeFromRoot === '..'
-      ) {
+      // Check for Windows absolute paths on non-Windows platforms
+      if (PathValidator.isWindowsAbsolutePath(inputPath) && process.platform !== "win32") {
         return {
           valid: false,
-          resolvedPath: PathValidator.normalizePath(resolvedPath),
-          error: `Path "${inputPath}" is outside workspace root`
+          resolvedPath: inputPath,
+          error: `Windows absolute path "${inputPath}" is not supported on non-Windows platforms. Use relative paths or POSIX absolute paths.`,
         };
       }
 
-      // Check against blocked paths
-      for (const blockedPath of this.config.blockedPaths) {
-        if (resolvedPath.startsWith(blockedPath)) {
-          return {
-            valid: false,
-            resolvedPath: PathValidator.normalizePath(resolvedPath),
-            error: `Access to system directory "${inputPath}" is blocked`
-          };
-        }
+      // Step 2 & 3: Compute workspace boundary and depth checks on OS-native paths
+      // Use path.relative() with OS-native paths before normalization
+      const relativeFromRoot = path.relative(this.config.root, inputPath);
+
+      // Ensure the path is within the workspace root
+      if (relativeFromRoot === "" || relativeFromRoot === ".") {
+        // Path is the root itself; allow
+      } else if (relativeFromRoot.startsWith(".." + path.sep) || relativeFromRoot === "..") {
+        return {
+          valid: false,
+          resolvedPath: inputPath,
+          error: `Path "${inputPath}" is outside workspace root`,
+        };
       }
 
-      // Check depth limit
-      const relativePath = relativeFromRoot;
-      const depth = relativePath.split(path.sep).length;
+      // Check depth limit using OS-native relative path
+      const depth = relativeFromRoot.split(path.sep).length;
 
       if (depth > this.config.maxDepth) {
         return {
           valid: false,
-          resolvedPath: PathValidator.normalizePath(resolvedPath),
-          error: `Path depth (${depth}) exceeds maximum allowed depth (${this.config.maxDepth})`
+          resolvedPath: inputPath,
+          error: `Path depth (${depth}) exceeds maximum allowed depth (${this.config.maxDepth})`,
         };
       }
 
-      // Return normalized path for ast-grep compatibility
+      // Step 4: Security checks on absolute input path
+      // Check against blocked paths
+      for (const blockedPath of this.config.blockedPaths) {
+        if (inputPath.startsWith(blockedPath)) {
+          return {
+            valid: false,
+            resolvedPath: inputPath,
+            error: `Access to system directory "${inputPath}" is blocked`,
+          };
+        }
+      }
+
+      // Step 5: After all validations pass, normalize path for ast-grep compatibility
+      // Normalize Windows paths to forward slashes only at the end
+      const normalizedPath = PathValidator.normalizePath(inputPath);
+
       return {
         valid: true,
-        resolvedPath: PathValidator.normalizePath(resolvedPath)
+        resolvedPath: normalizedPath,
       };
-
     } catch (error) {
+      // Step 6: Error handling
       const errorMessage = error instanceof Error ? error.message : String(error);
       return {
         valid: false,
         resolvedPath: PathValidator.normalizePath(inputPath),
-        error: `Invalid path: ${errorMessage}`
+        error: `Invalid path: ${errorMessage}`,
       };
     }
   }
 
-  validatePaths(inputPaths: string[]): { valid: boolean; resolvedPaths: string[]; errors: string[] } {
+  validatePaths(inputPaths: string[]): {
+    valid: boolean;
+    resolvedPaths: string[];
+    errors: string[];
+  } {
     const resolvedPaths: string[] = [];
     const errors: string[] = [];
     let allValid = true;
@@ -283,20 +344,22 @@ export class WorkspaceManager {
     return {
       valid: allValid,
       resolvedPaths,
-      errors
+      errors,
     };
   }
 
   // Get all files in the workspace (with safety limits)
-  async getWorkspaceFiles(options: {
-    includePatterns?: string[];
-    excludePatterns?: string[];
-    maxFiles?: number;
-  } = {}): Promise<string[]> {
+  async getWorkspaceFiles(
+    options: {
+      includePatterns?: string[];
+      excludePatterns?: string[];
+      maxFiles?: number;
+    } = {}
+  ): Promise<string[]> {
     const {
       includePatterns = [],
-      excludePatterns = ['node_modules', '.git', 'build', 'dist'],
-      maxFiles = 100000
+      excludePatterns = ["node_modules", ".git", "build", "dist"],
+      maxFiles = 100000,
     } = options;
 
     const files: string[] = [];
@@ -320,10 +383,11 @@ export class WorkspaceManager {
           visited.add(itemPath);
 
           // Check exclude patterns
-          if (excludePatterns.some(pattern => {
-            return relativePath.includes(pattern) ||
-                   item.startsWith('.') && pattern === '.*';
-          })) {
+          if (
+            excludePatterns.some((pattern) => {
+              return relativePath.includes(pattern) || (item.startsWith(".") && pattern === ".*");
+            })
+          ) {
             continue;
           }
 
@@ -331,15 +395,17 @@ export class WorkspaceManager {
 
           if (stats.isFile()) {
             // Check include patterns if specified
-            if (includePatterns.length === 0 ||
-                includePatterns.some(pattern => relativePath.includes(pattern))) {
+            if (
+              includePatterns.length === 0 ||
+              includePatterns.some((pattern) => relativePath.includes(pattern))
+            ) {
               files.push(itemPath);
             }
           } else if (stats.isDirectory()) {
             await scanDirectory(itemPath, currentDepth + 1);
           }
         }
-      } catch (error) {
+      } catch {
         // Skip directories we can't read
       }
     };
@@ -363,7 +429,7 @@ export class WorkspaceManager {
 
           if (stats.isFile()) {
             count++;
-          } else if (stats.isDirectory() && !item.startsWith('.')) {
+          } else if (stats.isDirectory() && !item.startsWith(".")) {
             count += await this.countFilesRecursive(itemPath, currentDepth + 1);
           }
         } catch {

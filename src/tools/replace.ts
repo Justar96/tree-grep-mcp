@@ -1,7 +1,37 @@
-import { AstGrepBinaryManager } from '../core/binary-manager.js';
-import { WorkspaceManager } from '../core/workspace-manager.js';
-import { ValidationError, ExecutionError } from '../types/errors.js';
-import { PatternValidator, ParameterValidator } from '../utils/validation.js';
+import * as path from "path";
+import { AstGrepBinaryManager } from "../core/binary-manager.js";
+import { WorkspaceManager } from "../core/workspace-manager.js";
+import { ValidationError, ExecutionError } from "../types/errors.js";
+import { PatternValidator, ParameterValidator, PathValidator } from "../utils/validation.js";
+
+interface ReplaceParams {
+  pattern: string;
+  replacement: string;
+  language?: string;
+  paths?: string[];
+  code?: string;
+  dryRun?: boolean;
+  timeoutMs?: number;
+}
+
+interface ChangeEntry {
+  file: string;
+  matches: number;
+  preview?: string;
+  applied: boolean;
+}
+
+interface ReplaceResult {
+  changes: ChangeEntry[];
+  skippedLines: number;
+  summary: {
+    totalChanges: number;
+    filesModified: number;
+    skippedLines: number;
+    dryRun: boolean;
+    warnings?: string[];
+  };
+}
 
 /**
  * Direct replace tool that calls ast-grep run --rewrite with minimal overhead
@@ -12,18 +42,23 @@ export class ReplaceTool {
     private workspaceManager: WorkspaceManager
   ) {}
 
-  async execute(params: any): Promise<any> {
+  async execute(paramsRaw: Record<string, unknown>): Promise<ReplaceResult> {
+    // Runtime parameter validation with type narrowing
+    const params = paramsRaw as unknown as ReplaceParams;
+
     // Validate pattern
-    if (!params.pattern || typeof params.pattern !== 'string') {
-      throw new ValidationError('Pattern is required and must be a string');
+    if (!params.pattern || typeof params.pattern !== "string") {
+      throw new ValidationError("Pattern is required and must be a string");
     }
 
-    const patternValidation = PatternValidator.validatePattern(params.pattern, params.language);
+    const patternValidation = PatternValidator.validatePattern(
+      params.pattern,
+      typeof params.language === "string" ? params.language : undefined
+    );
     if (!patternValidation.valid) {
-      throw new ValidationError(
-        `Invalid pattern: ${patternValidation.errors.join('; ')}`,
-        { errors: patternValidation.errors }
-      );
+      throw new ValidationError(`Invalid pattern: ${patternValidation.errors.join("; ")}`, {
+        errors: patternValidation.errors,
+      });
     }
 
     // Log pattern warnings if any - log each warning individually for better test assertions
@@ -35,17 +70,24 @@ export class ReplaceTool {
 
     // Validate replacement
     // Note: Empty string is valid (deletes matched pattern)
-    if (params.replacement === undefined || params.replacement === null || typeof params.replacement !== 'string') {
-      throw new ValidationError('Replacement is required and must be a string');
+    if (
+      params.replacement === undefined ||
+      params.replacement === null ||
+      typeof params.replacement !== "string"
+    ) {
+      throw new ValidationError("Replacement is required and must be a string");
     }
 
     // Only validate replacement pattern if non-empty
     // Empty replacement is valid for pattern deletion
     if (params.replacement.length > 0) {
-      const replacementValidation = PatternValidator.validatePattern(params.replacement, params.language);
+      const replacementValidation = PatternValidator.validatePattern(
+        params.replacement,
+        params.language
+      );
       if (!replacementValidation.valid) {
         throw new ValidationError(
-          `Invalid replacement: ${replacementValidation.errors.join('; ')}`,
+          `Invalid replacement: ${replacementValidation.errors.join("; ")}`,
           { errors: replacementValidation.errors }
         );
       }
@@ -55,18 +97,21 @@ export class ReplaceTool {
     // This ensures all metavariables used in replacement are defined in pattern
     // Example: pattern="foo($A)" with replacement="bar($B)" will fail
     // Unused pattern metavariables generate warnings (may be intentional)
-    const metavarValidation = PatternValidator.compareMetavariables(params.pattern, params.replacement);
+    const metavarValidation = PatternValidator.compareMetavariables(
+      params.pattern,
+      params.replacement
+    );
     if (!metavarValidation.valid) {
-      throw new ValidationError(
-        `Metavariable mismatch: ${metavarValidation.errors.join('; ')}`,
-        { errors: metavarValidation.errors }
-      );
+      throw new ValidationError(`Metavariable mismatch: ${metavarValidation.errors.join("; ")}`, {
+        errors: metavarValidation.errors,
+      });
     }
 
     // Capture warnings for API consumers
-    const warnings = metavarValidation.warnings && metavarValidation.warnings.length > 0
-      ? metavarValidation.warnings
-      : undefined;
+    const warnings =
+      metavarValidation.warnings && metavarValidation.warnings.length > 0
+        ? metavarValidation.warnings
+        : undefined;
 
     // Log warnings if any - log each warning individually for better test assertions
     if (warnings) {
@@ -78,73 +123,154 @@ export class ReplaceTool {
     // Validate optional parameters with actionable error messages
     const timeoutValidation = ParameterValidator.validateTimeout(params.timeoutMs);
     if (!timeoutValidation.valid) {
-      throw new ValidationError(timeoutValidation.errors.join('; '), { errors: timeoutValidation.errors });
+      throw new ValidationError(timeoutValidation.errors.join("; "), {
+        errors: timeoutValidation.errors,
+      });
     }
 
     const codeValidation = ParameterValidator.validateCode(params.code);
     if (!codeValidation.valid) {
-      throw new ValidationError(codeValidation.errors.join('; '), { errors: codeValidation.errors });
+      throw new ValidationError(codeValidation.errors.join("; "), {
+        errors: codeValidation.errors,
+      });
     }
 
     const normalizeLang = (lang: string) => {
       const map: Record<string, string> = {
-        javascript: 'js',
-        typescript: 'ts',
-        jsx: 'jsx',
-        tsx: 'tsx',
-        python: 'py',
-        py: 'py',
-        rust: 'rs',
-        rs: 'rs',
-        golang: 'go',
-        go: 'go',
-        java: 'java',
-        'c++': 'cpp',
-        cpp: 'cpp',
-        c: 'c',
-        kotlin: 'kt',
-        kt: 'kt',
+        javascript: "js",
+        typescript: "ts",
+        jsx: "jsx",
+        tsx: "tsx",
+        python: "py",
+        py: "py",
+        rust: "rs",
+        rs: "rs",
+        golang: "go",
+        go: "go",
+        java: "java",
+        "c++": "cpp",
+        cpp: "cpp",
+        c: "c",
+        csharp: "cs",
+        cs: "cs",
+        kotlin: "kt",
+        kt: "kt",
       };
-      const lower = (lang || '').toLowerCase();
+      const lower = (lang || "").toLowerCase();
       return map[lower] || lang;
     };
 
     // Build ast-grep command directly
-    const args = ['run', '--pattern', params.pattern.trim(), '--rewrite', params.replacement];
+    const args = ["run", "--pattern", params.pattern.trim(), "--rewrite", params.replacement];
 
     // Add language if provided
     if (params.language) {
-      args.push('--lang', normalizeLang(params.language));
+      args.push("--lang", normalizeLang(params.language));
     }
 
     // Handle dry-run vs actual replacement
-    if (!params.dryRun) {
-      args.push('--update-all');
+    // Default to dry-run (true) if not specified
+    if (params.dryRun === false) {
+      args.push("--update-all");
     }
     // Note: ast-grep run --rewrite outputs diff format by default (perfect for dry-run)
 
     // Handle inline code vs file paths
-    let executeOptions: any = {
+    const executeOptions: {
+      cwd: string;
+      timeout: number;
+      stdin?: string;
+    } = {
       cwd: this.workspaceManager.getWorkspaceRoot(),
-      timeout: params.timeoutMs || 60000
+      timeout: params.timeoutMs || 60000,
     };
 
     if (params.code) {
       // Inline code mode
-      args.push('--stdin');
+      args.push("--stdin");
       if (!params.language) {
-        throw new ValidationError('Language required for inline code');
+        throw new ValidationError("Language required for inline code");
       }
       executeOptions.stdin = params.code;
     } else {
       // File mode - add paths (default to current directory)
-      const inputPaths: string[] = params.paths && Array.isArray(params.paths) && params.paths.length > 0 ? params.paths : ['.'];
-      const { valid, resolvedPaths, errors } = this.workspaceManager.validatePaths(inputPaths);
-      if (!valid) {
-        const errorDetail = errors.length > 0 ? `: ${errors[0]}` : '';
-        throw new ValidationError(`Invalid paths${errorDetail}`, { errors });
+      // Only use "." as default when paths are omitted
+      const pathsProvided = params.paths && Array.isArray(params.paths) && params.paths.length > 0;
+      const inputPaths: string[] = pathsProvided && params.paths ? params.paths : ["."];
+
+      // Warn when scanning entire workspace with default path
+      if (!pathsProvided) {
+        const workspaceRoot = this.workspaceManager.getWorkspaceRoot();
+        const home = process.env.HOME || process.env.USERPROFILE || "";
+        
+        // Prevent scanning from home directory or common user directories
+        if (home && path.resolve(workspaceRoot) === path.resolve(home)) {
+          throw new ValidationError(
+            `Cannot replace in home directory without explicit paths. Please provide absolute paths to specific directories.`
+          );
+        }
+        
+        const normalizedRoot = workspaceRoot.toLowerCase();
+        const userDirPatterns = [
+          /[/\\]downloads[/\\]?$/i,
+          /[/\\]documents[/\\]?$/i,
+          /[/\\]desktop[/\\]?$/i,
+        ];
+        if (userDirPatterns.some((pattern) => pattern.test(normalizedRoot))) {
+          throw new ValidationError(
+            `Cannot replace in user directory without explicit paths. Please provide absolute paths to specific directories.`
+          );
+        }
+        
+        console.error(
+          `Warning: No paths provided, replacing in entire workspace from root: ${workspaceRoot}`
+        );
       }
-      args.push(...resolvedPaths);
+
+      // Validate that paths are absolute
+      // Only allow "." when it's the default (paths not provided by client)
+      for (const p of inputPaths) {
+        if (!path.isAbsolute(p)) {
+          if (p === "." || p === "") {
+            // "." or "" only allowed when paths were not provided (default case)
+            if (pathsProvided) {
+              throw new ValidationError(
+                `Path must be absolute. Use '/workspace/src/' or 'C:/workspace/src/'`
+              );
+            }
+          } else {
+            throw new ValidationError(
+              `Path must be absolute. Use '/workspace/src/' or 'C:/workspace/src/'`
+            );
+          }
+        }
+      }
+
+      // Normalize paths for ast-grep compatibility (Windows -> forward slashes)
+      // Empty strings should be treated as current directory
+      const normalizedPaths = inputPaths.map((p) =>
+        p === "" ? "." : PathValidator.normalizePath(p)
+      );
+
+      // Validate paths for security (but don't use the absolute resolved paths)
+      const { valid, errors } = this.workspaceManager.validatePaths(normalizedPaths);
+      if (!valid) {
+        // Replace normalized paths in error messages with original paths
+        const originalErrors = errors.map((err) => {
+          let modifiedErr = err;
+          for (let i = 0; i < normalizedPaths.length; i++) {
+            if (normalizedPaths[i] !== inputPaths[i]) {
+              modifiedErr = modifiedErr.replace(normalizedPaths[i], inputPaths[i]);
+            }
+          }
+          return modifiedErr;
+        });
+        const errorDetail = originalErrors.length > 0 ? `: ${originalErrors[0]}` : "";
+        throw new ValidationError(`Invalid paths${errorDetail}`, { errors: originalErrors });
+      }
+
+      // Pass normalized paths to ast-grep (not absolute resolved paths)
+      args.push(...normalizedPaths);
     }
 
     try {
@@ -156,8 +282,26 @@ export class ReplaceTool {
     }
   }
 
-  private parseResults(stdout: string, params: any, warnings?: string[]): any {
-    const changes: any[] = [];
+  /**
+   * Resolves file paths to absolute paths.
+   * Since input paths are absolute, ast-grep returns absolute paths.
+   * STDIN and empty strings are returned as-is.
+   */
+  private resolveFilePath(filePath: string): string {
+    // STDIN and empty paths stay as-is
+    if (filePath === "STDIN" || filePath === "") {
+      return filePath;
+    }
+    // If path is already absolute, return as-is
+    if (path.isAbsolute(filePath)) {
+      return filePath;
+    }
+    // Return unchanged if not absolute (contract: ast-grep returns absolute paths when given absolute inputs)
+    return filePath;
+  }
+
+  private parseResults(stdout: string, params: ReplaceParams, warnings?: string[]): ReplaceResult {
+    const changes: ChangeEntry[] = [];
 
     if (!stdout.trim()) {
       return {
@@ -168,65 +312,78 @@ export class ReplaceTool {
           filesModified: 0,
           skippedLines: 0,
           dryRun: params.dryRun !== false,
-          ...(warnings && warnings.length > 0 ? { warnings } : {})
-        }
+          ...(warnings && warnings.length > 0 ? { warnings } : {}),
+        },
       };
     }
 
     // Parse diff output - very simple approach
-    const lines = stdout.split('\n');
+    const lines = stdout.split("\n");
     let skippedLines = 0;
-    let currentFile = '';
+    let currentFile = "";
     let changeCount = 0;
-    let diffContent = '';
+    let diffContent = "";
 
     for (const line of lines) {
-      if (line && !line.startsWith('@@') && !line.includes('│') && !line.startsWith(' ')) {
+      if (line && !line.startsWith("@@") && !line.includes("│") && !line.startsWith(" ")) {
         // Looks like a file header
         if (currentFile && changeCount > 0) {
           changes.push({
-            file: currentFile,
+            file: this.resolveFilePath(currentFile),
             matches: changeCount,
             preview: params.dryRun !== false ? diffContent : undefined,
-            applied: params.dryRun === false
+            applied: params.dryRun === false,
           });
         }
         currentFile = line.trim();
         changeCount = 0;
-        diffContent = line + '\n';
-      } else if (line.includes('│ -') || line.includes('│ +') || line.includes('│-') || line.includes('│+')) {
+        diffContent = line + "\n";
+      } else if (
+        line.includes("│ -") ||
+        line.includes("│ +") ||
+        line.includes("│-") ||
+        line.includes("│+")
+      ) {
         // Change lines can have format: "3    │ -code" or "   3 │ +code"
-        if (line.includes('│ -') || line.includes('│-')) changeCount++;
-        diffContent += line + '\n';
+        if (line.includes("│ -") || line.includes("│-")) changeCount++;
+        diffContent += line + "\n";
       } else if (/^\s*\d+\s+\d+\s*│/.test(line)) {
         // Valid context line with line numbers (e.g., "1  1 │ code" or "1  1│ code")
-        diffContent += line + '\n';
-      } else if (line.trim() === '' || /^\s+$/.test(line) || line.startsWith('@@') ||
-                 line.startsWith('diff --git') || line.startsWith('index') ||
-                 line.startsWith('---') || line.startsWith('+++')) {
+        diffContent += line + "\n";
+      } else if (
+        line.trim() === "" ||
+        /^\s+$/.test(line) ||
+        line.startsWith("@@") ||
+        line.startsWith("diff --git") ||
+        line.startsWith("index") ||
+        line.startsWith("---") ||
+        line.startsWith("+++")
+      ) {
         // Valid formatting: empty lines, whitespace, diff markers, or diff metadata
-        diffContent += line + '\n';
+        diffContent += line + "\n";
       } else {
         // Unexpected line that doesn't match any known diff pattern
         skippedLines++;
         console.error(`Warning: Skipped unexpected diff line: ${line.substring(0, 100)}...`);
-        diffContent += line + '\n';
+        diffContent += line + "\n";
       }
     }
 
     // Don't forget the last file
     if (currentFile && (changeCount > 0 || diffContent.trim())) {
       changes.push({
-        file: currentFile,
+        file: this.resolveFilePath(currentFile),
         matches: Math.max(changeCount, 1),
         preview: params.dryRun !== false ? diffContent : undefined,
-        applied: params.dryRun === false
+        applied: params.dryRun === false,
       });
     }
 
     // Log summary warning if any lines were skipped
     if (skippedLines > 0) {
-      console.error(`Warning: Skipped ${skippedLines} unexpected diff lines out of ${lines.length} total lines`);
+      console.error(
+        `Warning: Skipped ${skippedLines} unexpected diff lines out of ${lines.length} total lines`
+      );
     }
 
     return {
@@ -237,14 +394,14 @@ export class ReplaceTool {
         filesModified: changes.length,
         skippedLines,
         dryRun: params.dryRun !== false,
-        ...(warnings && warnings.length > 0 ? { warnings } : {})
-      }
+        ...(warnings && warnings.length > 0 ? { warnings } : {}),
+      },
     };
   }
 
   static getSchema() {
     return {
-      name: 'ast_replace',
+      name: "ast_replace",
       description: `Structural code replacement using AST pattern matching. SAFE BY DEFAULT - runs in preview mode (dryRun: true) unless explicitly set to false. Returns diff preview and change statistics.
 
 QUICK START:
@@ -252,10 +409,10 @@ Preview replacement on inline code (safe, language REQUIRED):
 { "pattern": "console.log($ARG)", "replacement": "logger.info($ARG)", "code": "console.log('test');", "language": "javascript" }
 
 Preview replacement on files (safe):
-{ "pattern": "var $NAME = $VALUE", "replacement": "const $NAME = $VALUE", "paths": ["src/"], "dryRun": true }
+{ "pattern": "var $NAME = $VALUE", "replacement": "const $NAME = $VALUE", "paths": ["/workspace/src/"], "dryRun": true }
 
 Apply changes after reviewing preview:
-{ "pattern": "var $NAME = $VALUE", "replacement": "const $NAME = $VALUE", "paths": ["src/"], "dryRun": false }
+{ "pattern": "var $NAME = $VALUE", "replacement": "const $NAME = $VALUE", "paths": ["/workspace/src/"], "dryRun": false }
 
 WHEN TO USE:
 • Automated refactoring (rename functions, change APIs, update patterns)
@@ -264,9 +421,11 @@ WHEN TO USE:
 • Testing patterns before creating rules with ast_run_rule
 
 WHEN NOT TO USE:
-• Simple text replacement → Use sed/ripgrep
+• Simple text replacement → Use sed for faster, simpler text substitution
 • Need conditional replacements based on metavariable values → Use ast_run_rule with constraints
 • Adding new elements without existing structure → Manual editing required
+• Regex-based find and replace → Use sed or your editor's find/replace
+• Control flow refactoring (complex if/with/try blocks) → Limited support, may require manual editing
 
 METAVARIABLE CONSISTENCY:
 Pattern and replacement must use consistent metavariable names:
@@ -306,6 +465,9 @@ COMMON REPLACEMENT PATTERNS:
    Pattern: "fetch($URL)"
    Replacement: "await fetch($URL)"
 
+PATTERN LIBRARY:
+For more pattern examples, see: https://github.com/justar96/tree-grep-mcp/blob/main/PATTERN_LIBRARY.md
+
 ERROR RECOVERY:
 
 If replacement fails, check these common issues:
@@ -324,8 +486,10 @@ If replacement fails, check these common issues:
    → Pattern and replacement must use same names
 
 4. "Invalid paths"
-   → Use relative paths within workspace
+   → Use absolute paths like '/workspace/src/' or 'C:/workspace/src/'
+   → Relative paths are not supported (will be rejected with validation error)
    → Paths validated against workspace root for security
+   → Omit paths to modify entire workspace (defaults to current directory)
 
 5. Warning: "Metavariable $X in pattern is not used in replacement"
    → Not an error, but may be unintentional
@@ -352,12 +516,25 @@ DRY-RUN BEHAVIOR:
 • Output includes diff preview (when dryRun=true) or confirmation (when dryRun=false)
 • ALWAYS review dry-run output before setting dryRun=false
 
+BEST PRACTICES:
+• Always test with dryRun=true first to preview changes
+• Use for structural code refactoring, not simple text replacement
+• Test patterns on inline code before applying to files
+• Break large replacements into smaller, focused passes
+• Specify language for better parsing and validation
+• Review diff preview carefully before applying changes
+
 LIMITATIONS:
 • Replacement must be valid syntax for target language
 • Cannot add structural elements without matching existing ones
 • Complex transformations may require multiple passes
 • Metavariables must be complete AST nodes ($OBJ.$PROP, not $VAR.prop)
 • Paths must be within workspace root (security constraint)
+• Path depth limited to 6 levels from workspace root (use parent directories for deep paths)
+• Control flow refactoring (if/with/try blocks) has limited support
+• Multi-line patterns with newlines may not match - prefer single-line patterns
+• Not suitable for simple text replacement - use sed instead
+• Indentation-sensitive for multi-line patterns
 
 OPERATION MODES:
 
@@ -370,7 +547,7 @@ File Mode (for actual changes):
 • Specify paths or omit for entire workspace
 • Language optional but recommended for performance
 • ALWAYS test with dryRun=true first
-• Example: { pattern: "var $N = $V", replacement: "const $N = $V", paths: ["src/"], dryRun: true }
+• Example: { pattern: "var $N = $V", replacement: "const $N = $V", paths: ["/workspace/src/"], dryRun: true }
 
 OUTPUT STRUCTURE:
 • changes: Array of { file, matches, preview (if dryRun), applied (if not dryRun) }
@@ -394,45 +571,51 @@ dryRun: false → --update-all flag
 dryRun: true (default) → no flag (preview mode)
 timeoutMs → process timeout (not a CLI flag)
 
-Example: { pattern: "var $N = $V", replacement: "const $N = $V", paths: ["src/"], dryRun: true }
-CLI: ast-grep run --pattern "var $N = $V" --rewrite "const $N = $V" src/ (no --update-all = preview)`,
+Example: { pattern: "var $N = $V", replacement: "const $N = $V", paths: ["/workspace/src/"], dryRun: true }
+CLI: ast-grep run --pattern "var $N = $V" --rewrite "const $N = $V" /workspace/src/ (no --update-all = preview)`,
 
       inputSchema: {
-        type: 'object',
+        type: "object",
         properties: {
           pattern: {
-            type: 'string',
-            description: 'AST pattern to match. Must use same metavariable names as replacement.'
+            type: "string",
+            description: "AST pattern to match. Must use same metavariable names as replacement.",
           },
           replacement: {
-            type: 'string',
-            description: 'Replacement template. Reuses pattern metavariables. Can reorder, duplicate, or omit variables.'
+            type: "string",
+            description:
+              "Replacement template. Reuses pattern metavariables. Can reorder, duplicate, or omit variables.",
           },
           code: {
-            type: 'string',
-            description: 'Inline code to modify. Requires language parameter. Use for testing patterns safely.'
+            type: "string",
+            description:
+              "Inline code to modify. Requires language parameter. Use for testing patterns safely.",
           },
           paths: {
-            type: 'array',
-            items: { type: 'string' },
-            description: 'File/directory paths to modify within workspace. Omit for entire workspace. Security validated.'
+            type: "array",
+            items: { type: "string" },
+            description:
+              "ABSOLUTE file/directory paths to modify within workspace (e.g., '/workspace/src/', 'C:/workspace/src/'). Relative paths NOT supported. Omit for entire workspace. Security validated.",
           },
           language: {
-            type: 'string',
-            description: 'Programming language (js/ts/py/java/rust/go/cpp). Required for inline code, recommended for paths.'
+            type: "string",
+            description:
+              "Programming language (js/ts/py/java/rust/go/cpp/kotlin/csharp). Required for inline code, recommended for paths.",
           },
           dryRun: {
-            type: 'boolean',
-            description: 'If true or omitted, preview only (no files modified). If false, apply changes after review.'
+            type: "boolean",
+            description:
+              "If true or omitted, preview only (no files modified). If false, apply changes after review.",
           },
           timeoutMs: {
-            type: 'number',
-            description: 'Timeout in milliseconds (1000-300000). Default: 60000. Increase for large repos.'
-          }
+            type: "number",
+            description:
+              "Timeout in milliseconds (1000-300000). Default: 60000. Increase for large repos.",
+          },
         },
-        required: ['pattern', 'replacement'],
-        additionalProperties: false
-      }
+        required: ["pattern", "replacement"],
+        additionalProperties: false,
+      },
     };
   }
 }

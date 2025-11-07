@@ -16,7 +16,7 @@ export interface PatternObject {
   /** Surrounding code context for correct parsing */
   context?: string;
   /** Matching algorithm strictness level */
-  strictness?: 'cst' | 'smart' | 'ast' | 'relaxed' | 'signature';
+  strictness?: "cst" | "smart" | "ast" | "relaxed" | "signature";
 }
 
 export type Pattern = string | PatternObject;
@@ -24,7 +24,7 @@ export type Pattern = string | PatternObject;
 /**
  * Controls search termination for relational rules
  */
-export type StopBy = 'neighbor' | 'end' | Rule;
+export type StopBy = "neighbor" | "end" | Rule;
 
 /**
  * Relational rule base properties
@@ -47,11 +47,14 @@ export interface AtomicRule {
   /** Match node's text by Rust regex */
   regex?: string;
   /** Match nodes by their index within parent's children */
-  nthChild?: number | string | {
-    position: number | string;
-    reverse?: boolean;
-    ofRule?: Rule;
-  };
+  nthChild?:
+    | number
+    | string
+    | {
+        position: number | string;
+        reverse?: boolean;
+        ofRule?: Rule;
+      };
   /** Match node by character-based start/end positions */
   range?: {
     start: { line: number; column: number };
@@ -105,7 +108,7 @@ export interface Constraint {
   /** Exact string the metavariable must equal */
   equals?: string;
   /** Constraint kind (default: 'regex') */
-  kind?: 'regex' | 'pattern';
+  kind?: "regex" | "pattern";
 }
 
 /**
@@ -128,12 +131,19 @@ export interface Transform {
     /** Case conversion operation */
     convert?: {
       source: string;
-      toCase: 'lowerCase' | 'upperCase' | 'capitalize' | 'camelCase' | 'pascalCase' | 'snakeCase' | 'kebabCase';
+      toCase:
+        | "lowerCase"
+        | "upperCase"
+        | "capitalize"
+        | "camelCase"
+        | "pascalCase"
+        | "snakeCase"
+        | "kebabCase";
     };
     /** Rewrite operation */
     rewrite?: {
       source: string;
-      rewriters: any[];
+      rewriters: Record<string, unknown>[];
     };
   };
 }
@@ -150,7 +160,7 @@ export interface RuleConfig {
   /** Human-readable message describing the issue */
   message?: string;
   /** Severity level */
-  severity?: 'error' | 'warning' | 'info' | 'hint' | 'off';
+  severity?: "error" | "warning" | "info" | "hint" | "off";
   /** The matching rule (required) */
   rule: Rule;
   /** Constraints on captured metavariables */
@@ -162,18 +172,18 @@ export interface RuleConfig {
   /** Utility rules for reuse */
   utils?: Record<string, Rule>;
   /** Metadata (documentation, note, etc.) */
-  metadata?: Record<string, any>;
+  metadata?: Record<string, unknown>;
 }
 
 /**
  * Helper type guards for discriminating rule types
  */
 export function isPatternObject(pattern: Pattern): pattern is PatternObject {
-  return typeof pattern === 'object' && pattern !== null;
+  return typeof pattern === "object" && pattern !== null;
 }
 
 export function hasKindRule(rule: Rule): boolean {
-  return typeof rule.kind === 'string';
+  return typeof rule.kind === "string";
 }
 
 export function hasRelationalRule(rule: Rule): boolean {

@@ -89,3 +89,4 @@ AST_GREP_ALL_DOCUMENTS.md
 
 # Manual test files
 test-manual/
+.augment/

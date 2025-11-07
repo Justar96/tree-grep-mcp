@@ -1,7 +1,42 @@
-import { AstGrepBinaryManager } from '../core/binary-manager.js';
-import { WorkspaceManager } from '../core/workspace-manager.js';
-import { ValidationError, ExecutionError } from '../types/errors.js';
-import { PatternValidator, ParameterValidator } from '../utils/validation.js';
+import * as path from "path";
+import { AstGrepBinaryManager } from "../core/binary-manager.js";
+import { WorkspaceManager } from "../core/workspace-manager.js";
+import { ValidationError, ExecutionError } from "../types/errors.js";
+import { PatternValidator, ParameterValidator, PathValidator } from "../utils/validation.js";
+
+interface SearchParams {
+  pattern: string;
+  language?: string;
+  paths?: string[];
+  code?: string;
+  context?: number;
+  maxMatches?: number;
+  timeoutMs?: number;
+}
+
+interface MatchEntry {
+  file: string;
+  line: number;
+  column: number;
+  text: string;
+  context?: {
+    before: string[];
+    after: string[];
+  };
+}
+
+interface SearchResult {
+  matches: MatchEntry[];
+  skippedLines: number;
+  totalMatches?: number;
+  filesMatched?: number;
+  summary: {
+    totalMatches: number;
+    truncated: boolean;
+    skippedLines: number;
+    executionTime: number;
+  };
+}
 
 /**
  * Direct search tool that calls ast-grep run with minimal overhead
@@ -12,18 +47,23 @@ export class SearchTool {
     private workspaceManager: WorkspaceManager
   ) {}
 
-  async execute(params: any): Promise<any> {
+  async execute(paramsRaw: Record<string, unknown>): Promise<SearchResult> {
+    // Runtime parameter validation with type narrowing
+    const params = paramsRaw as unknown as SearchParams;
+
     // Validate pattern
-    if (!params.pattern || typeof params.pattern !== 'string') {
-      throw new ValidationError('Pattern is required and must be a string');
+    if (!params.pattern || typeof params.pattern !== "string") {
+      throw new ValidationError("Pattern is required and must be a string");
     }
 
-    const patternValidation = PatternValidator.validatePattern(params.pattern, params.language);
+    const patternValidation = PatternValidator.validatePattern(
+      params.pattern,
+      typeof params.language === "string" ? params.language : undefined
+    );
     if (!patternValidation.valid) {
-      throw new ValidationError(
-        `Invalid pattern: ${patternValidation.errors.join('; ')}`,
-        { errors: patternValidation.errors }
-      );
+      throw new ValidationError(`Invalid pattern: ${patternValidation.errors.join("; ")}`, {
+        errors: patternValidation.errors,
+      });
     }
 
     // Log warnings if any - log each warning individually for better test assertions
@@ -36,95 +76,192 @@ export class SearchTool {
     // Validate optional parameters with actionable error messages
     const contextValidation = ParameterValidator.validateContext(params.context);
     if (!contextValidation.valid) {
-      throw new ValidationError(contextValidation.errors.join('; '), { errors: contextValidation.errors });
+      throw new ValidationError(contextValidation.errors.join("; "), {
+        errors: contextValidation.errors,
+      });
     }
 
     const maxMatchesValidation = ParameterValidator.validateMaxMatches(params.maxMatches);
     if (!maxMatchesValidation.valid) {
-      throw new ValidationError(maxMatchesValidation.errors.join('; '), { errors: maxMatchesValidation.errors });
+      throw new ValidationError(maxMatchesValidation.errors.join("; "), {
+        errors: maxMatchesValidation.errors,
+      });
     }
 
     const timeoutValidation = ParameterValidator.validateTimeout(params.timeoutMs);
     if (!timeoutValidation.valid) {
-      throw new ValidationError(timeoutValidation.errors.join('; '), { errors: timeoutValidation.errors });
+      throw new ValidationError(timeoutValidation.errors.join("; "), {
+        errors: timeoutValidation.errors,
+      });
     }
 
     const codeValidation = ParameterValidator.validateCode(params.code);
     if (!codeValidation.valid) {
-      throw new ValidationError(codeValidation.errors.join('; '), { errors: codeValidation.errors });
+      throw new ValidationError(codeValidation.errors.join("; "), {
+        errors: codeValidation.errors,
+      });
     }
 
     // Normalize language aliases when provided
     const normalizeLang = (lang: string) => {
       const map: Record<string, string> = {
-        javascript: 'js',
-        typescript: 'ts',
-        jsx: 'jsx',
-        tsx: 'tsx',
-        python: 'py',
-        py: 'py',
-        rust: 'rs',
-        rs: 'rs',
-        golang: 'go',
-        go: 'go',
-        java: 'java',
-        'c++': 'cpp',
-        cpp: 'cpp',
-        c: 'c',
-        kotlin: 'kt',
-        kt: 'kt',
+        javascript: "js",
+        typescript: "ts",
+        jsx: "jsx",
+        tsx: "tsx",
+        python: "py",
+        py: "py",
+        rust: "rs",
+        rs: "rs",
+        golang: "go",
+        go: "go",
+        java: "java",
+        "c++": "cpp",
+        cpp: "cpp",
+        c: "c",
+        csharp: "cs",
+        cs: "cs",
+        kotlin: "kt",
+        kt: "kt",
       };
-      const lower = (lang || '').toLowerCase();
+      const lower = (lang || "").toLowerCase();
       return map[lower] || lang;
     };
 
     // Build ast-grep command directly
-    const args = ['run', '--pattern', params.pattern.trim()];
+    const args = ["run", "--pattern", params.pattern.trim()];
 
     // Add language if provided
     if (params.language) {
-      args.push('--lang', normalizeLang(params.language));
+      args.push("--lang", normalizeLang(params.language));
     }
 
     // Always use JSON stream for parsing
-    args.push('--json=stream');
+    args.push("--json=stream");
 
     // Add context if requested
     if (params.context && params.context > 0) {
-      args.push('--context', params.context.toString());
+      args.push("--context", params.context.toString());
     }
 
     // Handle inline code vs file paths
-    let executeOptions: any = {
+    const executeOptions: {
+      cwd: string;
+      timeout: number;
+      stdin?: string;
+    } = {
       cwd: this.workspaceManager.getWorkspaceRoot(),
-      timeout: params.timeoutMs || 30000
+      timeout: params.timeoutMs || 30000,
     };
 
     if (params.code) {
       // Inline code mode
-      args.push('--stdin');
+      args.push("--stdin");
       if (!params.language) {
-        throw new ValidationError('Language required for inline code');
+        throw new ValidationError("Language required for inline code");
       }
       executeOptions.stdin = params.code;
     } else {
       // File mode - add paths (default to current directory)
-      const inputPaths: string[] = params.paths && Array.isArray(params.paths) && params.paths.length > 0 ? params.paths : ['.'];
-      const { valid, resolvedPaths, errors } = this.workspaceManager.validatePaths(inputPaths);
+      // Only use "." as default when paths are omitted
+      const pathsProvided = params.paths && Array.isArray(params.paths) && params.paths.length > 0;
+      const inputPaths: string[] = pathsProvided && params.paths ? params.paths : ["."];
+
+      // Warn when scanning entire workspace with default path
+      if (!pathsProvided) {
+        const workspaceRoot = this.workspaceManager.getWorkspaceRoot();
+        const home = process.env.HOME || process.env.USERPROFILE || "";
+        
+        // Prevent scanning from home directory or common user directories
+        if (home && path.resolve(workspaceRoot) === path.resolve(home)) {
+          throw new ValidationError(
+            `Cannot scan from home directory without explicit paths. Please provide absolute paths to specific directories.`
+          );
+        }
+        
+        const normalizedRoot = workspaceRoot.toLowerCase();
+        const userDirPatterns = [
+          /[/\\]downloads[/\\]?$/i,
+          /[/\\]documents[/\\]?$/i,
+          /[/\\]desktop[/\\]?$/i,
+        ];
+        if (userDirPatterns.some((pattern) => pattern.test(normalizedRoot))) {
+          throw new ValidationError(
+            `Cannot scan from user directory without explicit paths. Please provide absolute paths to specific directories.`
+          );
+        }
+        
+        console.error(
+          `Warning: No paths provided, scanning entire workspace from root: ${workspaceRoot}`
+        );
+      }
+
+      // Validate that paths are absolute
+      // Only allow "." when it's the default (paths not provided by client)
+      for (const p of inputPaths) {
+        if (!path.isAbsolute(p)) {
+          if (p === "." || p === "") {
+            // "." or "" only allowed when paths were not provided (default case)
+            if (pathsProvided) {
+              throw new ValidationError(
+                `Path must be absolute. Use '/workspace/src/' or 'C:/workspace/src/'`
+              );
+            }
+          } else {
+            throw new ValidationError(
+              `Path must be absolute. Use '/workspace/src/' or 'C:/workspace/src/'`
+            );
+          }
+        }
+      }
+
+      // Normalize paths for ast-grep compatibility (Windows -> forward slashes)
+      // Empty strings should be treated as current directory
+      const normalizedPaths = inputPaths.map((p) =>
+        p === "" ? "." : PathValidator.normalizePath(p)
+      );
+
+      // Validate paths for security (but don't use the absolute resolved paths)
+      const { valid, errors } = this.workspaceManager.validatePaths(normalizedPaths);
       if (!valid) {
-        const errorDetail = errors.length > 0 ? `: ${errors[0]}` : '';
-        throw new ValidationError(`Invalid paths${errorDetail}`, { errors });
+        // Replace normalized paths in error messages with original paths
+        const originalErrors = errors.map((err) => {
+          let modifiedErr = err;
+          for (let i = 0; i < normalizedPaths.length; i++) {
+            if (normalizedPaths[i] !== inputPaths[i]) {
+              modifiedErr = modifiedErr.replace(normalizedPaths[i], inputPaths[i]);
+            }
+          }
+          return modifiedErr;
+        });
+        const errorDetail = originalErrors.length > 0 ? `: ${originalErrors[0]}` : "";
+        throw new ValidationError(`Invalid paths${errorDetail}`, { errors: originalErrors });
       }
+
       // Try to infer language if not provided (based on extension of first path when it is a file)
-      if (!params.language && resolvedPaths.length === 1) {
-        const first = resolvedPaths[0].toLowerCase();
-        const inferred = first.endsWith('.ts') ? 'ts' :
-                         first.endsWith('.tsx') ? 'tsx' :
-                         first.endsWith('.jsx') ? 'jsx' :
-                         first.endsWith('.js') ? 'js' : undefined;
-        if (inferred) args.push('--lang', inferred);
+      if (!params.language && normalizedPaths.length === 1) {
+        const first = normalizedPaths[0].toLowerCase();
+        const inferred = first.endsWith(".ts")
+          ? "ts"
+          : first.endsWith(".tsx")
+            ? "tsx"
+            : first.endsWith(".jsx")
+              ? "jsx"
+              : first.endsWith(".js")
+                ? "js"
+                : undefined;
+        if (inferred) args.push("--lang", inferred);
       }
-      args.push(...resolvedPaths);
+
+      // Pass normalized paths to ast-grep (not absolute resolved paths)
+      args.push(...normalizedPaths);
+
+      // Log paths being scanned for debugging
+      if (normalizedPaths.length <= 3) {
+        console.error(`Scanning paths: ${normalizedPaths.join(", ")}`);
+      } else {
+        console.error(`Scanning ${normalizedPaths.length} paths`);
+      }
     }
 
     try {
@@ -136,8 +273,26 @@ export class SearchTool {
     }
   }
 
-  private parseResults(stdout: string, params: any): any {
-    const matches: any[] = [];
+  /**
+   * Resolves file paths to absolute paths.
+   * Since input paths are absolute, ast-grep returns absolute paths.
+   * STDIN and empty strings are returned as-is.
+   */
+  private resolveFilePath(filePath: string): string {
+    // STDIN and empty paths stay as-is
+    if (filePath === "STDIN" || filePath === "") {
+      return filePath;
+    }
+    // If path is already absolute, return as-is
+    if (path.isAbsolute(filePath)) {
+      return filePath;
+    }
+    // Return unchanged if not absolute (contract: ast-grep returns absolute paths when given absolute inputs)
+    return filePath;
+  }
+
+  private parseResults(stdout: string, params: SearchParams): SearchResult {
+    const matches: MatchEntry[] = [];
     let skippedLines = 0;
 
     if (!stdout.trim()) {
@@ -146,36 +301,44 @@ export class SearchTool {
         skippedLines: 0,
         summary: {
           totalMatches: 0,
+          truncated: false,
+          skippedLines: 0,
           executionTime: 0,
-          skippedLines: 0
-        }
+        },
       };
     }
 
     // Parse JSONL output
-    const lines = stdout.trim().split('\n');
+    const lines = stdout.trim().split("\n");
     for (const line of lines) {
       if (!line.trim()) continue;
       try {
-        const match = JSON.parse(line);
+        const match = JSON.parse(line) as {
+          file?: string;
+          range?: { start?: { line?: number; column?: number } };
+          text?: string;
+          context?: { before?: string[]; after?: string[] };
+        };
         matches.push({
-          file: match.file || '',
+          file: this.resolveFilePath(match.file || ""),
           line: (match.range?.start?.line || 0) + 1, // Convert to 1-based
           column: match.range?.start?.column || 0,
-          text: match.text || '',
+          text: match.text || "",
           context: {
             before: match.context?.before || [],
-            after: match.context?.after || []
-          }
+            after: match.context?.after || [],
+          },
         });
-      } catch (e) {
+      } catch {
         skippedLines++;
         console.error(`Warning: Skipped malformed JSON line: ${line.substring(0, 100)}...`);
       }
     }
 
     if (skippedLines > 0) {
-      console.error(`Warning: Skipped ${skippedLines} malformed result lines out of ${lines.length} total lines`);
+      console.error(
+        `Warning: Skipped ${skippedLines} malformed result lines out of ${lines.length} total lines`
+      );
     }
 
     const maxMatches = params.maxMatches || 100;
@@ -186,19 +349,19 @@ export class SearchTool {
         totalMatches: matches.length,
         truncated: matches.length > maxMatches,
         skippedLines,
-        executionTime: 0 // We don't need precise timing
-      }
+        executionTime: 0, // We don't need precise timing
+      },
     };
   }
 
   static getSchema() {
     return {
-      name: 'ast_search',
+      name: "ast_search",
       description: `Structural code search using AST pattern matching. Searches code by syntax tree structure, not text matching. Returns file locations, line numbers, and matched code with context.
 
 QUICK START:
 Search JavaScript files for console.log calls:
-{ "pattern": "console.log($ARG)", "paths": ["src/"], "language": "javascript" }
+{ "pattern": "console.log($ARG)", "paths": ["/workspace/src/"], "language": "javascript" }
 
 Search inline code (language REQUIRED):
 { "pattern": "console.log($ARG)", "code": "console.log('test');", "language": "javascript" }
@@ -214,6 +377,9 @@ WHEN NOT TO USE:
 • Want to provide fix suggestions → Use ast_run_rule with fix parameter
 • Need severity levels or categorization → Use ast_run_rule
 • Text-based search (grep strings) → Use grep/ripgrep tools instead
+• Simple string matching without code structure → Use grep/ripgrep (faster and more appropriate)
+• Control flow analysis (complex if/with/try blocks) → Limited support, may require structural rules
+• Regex-only matching → ast-grep requires AST patterns, use grep with regex instead
 
 PATTERN SYNTAX:
 • $VAR - Single AST node (expression, identifier, statement)
@@ -258,6 +424,9 @@ JSX/TSX (set language to 'jsx' or 'tsx'):
    Event handler: "<Button onClick={$HANDLER}>"
    WARNING: Broad patterns like "<$TAG>" match thousands of elements - be specific
 
+PATTERN LIBRARY:
+For more pattern examples, see: https://github.com/justar96/tree-grep-mcp/blob/main/PATTERN_LIBRARY.md
+
 ERROR RECOVERY:
 
 If search fails, check these common issues:
@@ -267,9 +436,10 @@ If search fails, check these common issues:
    → Example: { pattern: "$P", code: "test", language: "javascript" }
 
 2. "Invalid paths"
-   → Use relative paths within workspace (e.g., "src/", not "/etc/")
+   → Use absolute paths like '/workspace/src/' or 'C:/workspace/src/'
+   → Relative paths are not supported (will be rejected with validation error)
    → Paths validated against workspace root for security
-   → Omit paths to search entire workspace
+   → Omit paths to search entire workspace (defaults to current directory)
 
 3. "Invalid pattern: Use named multi-node metavariables like $$BODY instead of bare $$"
    → Replace "$$$" with "$$$NAME"
@@ -294,11 +464,24 @@ If search fails, check these common issues:
    → Or narrow search scope to reduce matches
    → summary.totalMatches shows complete count even when truncated
 
+BEST PRACTICES:
+• Use for structural code patterns, not plain text searches
+• Start with simple patterns and add complexity incrementally
+• Test patterns on inline code before scanning large codebases
+• Specify language for faster parsing and better results
+• Use specific paths to reduce search scope and improve performance
+• For relational rules (inside/has), use stopBy: end to search thoroughly
+
 LIMITATIONS:
 • Paths must be within workspace root (security constraint)
-• Pattern syntax is language-specific
-• Metavariables must be complete AST nodes
-• Multi-node metavariables must be named
+• Path depth limited to 6 levels from workspace root (use parent directories for deep paths)
+• Pattern syntax is language-specific (JS patterns won't work in Python)
+• Metavariables must be complete AST nodes (not partial identifiers)
+• Multi-node metavariables must be named ($$$ARGS, not $$$)
+• Control flow patterns (if/with/try blocks) have limited support
+• Multi-line patterns with newlines may not match - prefer single-line or structural rules
+• Not suitable for simple text matching - use grep/ripgrep instead
+• Indentation-sensitive for multi-line patterns
 • High skippedLines in output indicates ast-grep format changes (report issue)
 
 OPERATION MODES:
@@ -306,7 +489,7 @@ OPERATION MODES:
 File/Directory Mode (default):
 • Specify paths or omit for current directory
 • Language optional but recommended for performance
-• Example: { pattern: "console.log($$$ARGS)", paths: ["src/"], language: "javascript" }
+• Example: { pattern: "console.log($$$ARGS)", paths: ["/workspace/src/"], language: "javascript" }
 
 Inline Code Mode:
 • Use code parameter for testing patterns on snippets
@@ -335,45 +518,52 @@ context → --context <number>
 maxMatches → result slicing (not a CLI flag)
 timeoutMs → process timeout (not a CLI flag)
 
-Example: { pattern: "console.log($ARG)", paths: ["src/"], language: "js", context: 2 }
-CLI: ast-grep run --pattern "console.log($ARG)" --lang js --context 2 --json=stream src/`,
+Example: { pattern: "console.log($ARG)", paths: ["/workspace/src/"], language: "js", context: 2 }
+CLI: ast-grep run --pattern "console.log($ARG)" --lang js --context 2 --json=stream /workspace/src/`,
 
       inputSchema: {
-        type: 'object',
+        type: "object",
         properties: {
           pattern: {
-            type: 'string',
-            description: 'AST pattern with metavariables ($VAR, $$$NAME, $_). Must be valid syntax for target language.'
+            type: "string",
+            description:
+              "AST pattern with metavariables ($VAR, $$$NAME, $_). Must be valid syntax for target language.",
           },
           code: {
-            type: 'string',
-            description: 'Inline code to search. Requires language parameter. Use for testing patterns.'
+            type: "string",
+            description:
+              "Inline code to search. Requires language parameter. Use for testing patterns.",
           },
           paths: {
-            type: 'array',
-            items: { type: 'string' },
-            description: 'File/directory paths within workspace. Omit to search entire workspace. Security validated.'
+            type: "array",
+            items: { type: "string" },
+            description:
+              "ABSOLUTE file/directory paths within workspace (e.g., '/workspace/src/', 'C:/workspace/src/'). Relative paths NOT supported. Omit to search entire workspace. Security validated.",
           },
           language: {
-            type: 'string',
-            description: 'Programming language (js/ts/py/java/rust/go/cpp). Required for inline code, recommended for paths.'
+            type: "string",
+            description:
+              "Programming language (js/ts/py/java/rust/go/cpp/kotlin/csharp). Required for inline code, recommended for paths.",
           },
           context: {
-            type: 'number',
-            description: 'Context lines around matches (0-100). Default: 3. Higher values increase output size.'
+            type: "number",
+            description:
+              "Context lines around matches (0-100). Default: 3. Higher values increase output size.",
           },
           maxMatches: {
-            type: 'number',
-            description: 'Maximum matches to return (1-10000). Default: 100. Check summary.truncated if limited.'
+            type: "number",
+            description:
+              "Maximum matches to return (1-10000). Default: 100. Check summary.truncated if limited.",
           },
           timeoutMs: {
-            type: 'number',
-            description: 'Timeout in milliseconds (1000-300000). Default: 30000. Increase for large repos.'
-          }
+            type: "number",
+            description:
+              "Timeout in milliseconds (1000-300000). Default: 30000. Increase for large repos.",
+          },
         },
-        required: ['pattern'],
-        additionalProperties: false
-      }
+        required: ["pattern"],
+        additionalProperties: false,
+      },
     };
   }
 }
