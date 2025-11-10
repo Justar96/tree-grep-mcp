@@ -934,6 +934,146 @@ describe("ParameterValidator", () => {
       expect(result.errors.some((e) => e.includes("must be a boolean"))).toBe(true);
     });
   });
+
+  describe("validateContextWindow", () => {
+    test("accepts valid before/after values", () => {
+      expect(ParameterValidator.validateContextWindow("before", 0).valid).toBe(true);
+      expect(ParameterValidator.validateContextWindow("after", 50).valid).toBe(true);
+    });
+
+    test("rejects invalid numbers", () => {
+      const negative = ParameterValidator.validateContextWindow("before", -1);
+      expect(negative.valid).toBe(false);
+      const large = ParameterValidator.validateContextWindow("after", 101);
+      expect(large.valid).toBe(false);
+    });
+
+    test("rejects non-number types", () => {
+      const result = ParameterValidator.validateContextWindow("before", "3" as any);
+      expect(result.valid).toBe(false);
+    });
+  });
+
+  describe("validateContextCombination", () => {
+    test("accepts mutually exclusive usage", () => {
+      expect(ParameterValidator.validateContextCombination(undefined, 1, 2).valid).toBe(true);
+      expect(ParameterValidator.validateContextCombination(3, undefined, undefined).valid).toBe(
+        true
+      );
+    });
+
+    test("rejects mixing context with before/after", () => {
+      const result = ParameterValidator.validateContextCombination(3, 1, undefined);
+      expect(result.valid).toBe(false);
+      expect(result.errors.some((e) => e.includes("cannot be combined"))).toBe(true);
+    });
+  });
+
+  describe("validateGlobs", () => {
+    test("accepts array of glob strings", () => {
+      const result = ParameterValidator.validateGlobs(["src/**/*.ts", "!dist/**"]);
+      expect(result.valid).toBe(true);
+    });
+
+    test("rejects invalid entries", () => {
+      const result = ParameterValidator.validateGlobs(["", 123 as any]);
+      expect(result.valid).toBe(false);
+    });
+  });
+
+  describe("validateNoIgnore", () => {
+    test("accepts allowed values", () => {
+      const result = ParameterValidator.validateNoIgnore(["hidden", "vcs"]);
+      expect(result.valid).toBe(true);
+    });
+
+    test("rejects unknown values", () => {
+      const result = ParameterValidator.validateNoIgnore(["invalid" as any]);
+      expect(result.valid).toBe(false);
+    });
+  });
+
+  describe("validateBooleanOption", () => {
+    test("accepts booleans", () => {
+      expect(ParameterValidator.validateBooleanOption(true, "follow").valid).toBe(true);
+      expect(ParameterValidator.validateBooleanOption(false, "follow").valid).toBe(true);
+    });
+
+    test("rejects non-booleans", () => {
+      const result = ParameterValidator.validateBooleanOption("yes" as any, "follow");
+      expect(result.valid).toBe(false);
+    });
+  });
+
+  describe("validateThreads", () => {
+    test("accepts integers between 0 and 256", () => {
+      expect(ParameterValidator.validateThreads(0).valid).toBe(true);
+      expect(ParameterValidator.validateThreads(32).valid).toBe(true);
+      expect(ParameterValidator.validateThreads(256).valid).toBe(true);
+    });
+
+    test("rejects invalid values", () => {
+      expect(ParameterValidator.validateThreads(-1).valid).toBe(false);
+      expect(ParameterValidator.validateThreads(512).valid).toBe(false);
+      expect(ParameterValidator.validateThreads(1.5).valid).toBe(false);
+    });
+  });
+
+  describe("validateInspect", () => {
+    test("accepts allowed granularity values", () => {
+      expect(ParameterValidator.validateInspect("summary").valid).toBe(true);
+      expect(ParameterValidator.validateInspect("entity").valid).toBe(true);
+    });
+
+    test("rejects unsupported values", () => {
+      const result = ParameterValidator.validateInspect("verbose" as any);
+      expect(result.valid).toBe(false);
+    });
+  });
+
+  describe("validateJsonStyle", () => {
+    test("accepts allowed json styles", () => {
+      expect(ParameterValidator.validateJsonStyle("pretty").valid).toBe(true);
+      expect(ParameterValidator.validateJsonStyle("stream").valid).toBe(true);
+      expect(ParameterValidator.validateJsonStyle("compact").valid).toBe(true);
+    });
+
+    test("rejects unsupported styles", () => {
+      const result = ParameterValidator.validateJsonStyle("detailed" as any);
+      expect(result.valid).toBe(false);
+    });
+  });
+
+  describe("validateFormat", () => {
+    test("accepts github format", () => {
+      expect(ParameterValidator.validateFormat("github").valid).toBe(true);
+    });
+
+    test("rejects unsupported formats", () => {
+      const result = ParameterValidator.validateFormat("text" as any);
+      expect(result.valid).toBe(false);
+    });
+  });
+
+  describe("validateSeverityOverrides", () => {
+    test("accepts boolean and string arrays", () => {
+      const result = ParameterValidator.validateSeverityOverrides({
+        error: ["rule-a", "rule-b"],
+        warning: true,
+      });
+      expect(result.valid).toBe(true);
+    });
+
+    test("rejects invalid entries", () => {
+      const result = ParameterValidator.validateSeverityOverrides({
+        error: [],
+        info: [123 as any],
+        hint: false as any,
+      });
+      expect(result.valid).toBe(false);
+      expect(result.errors.length).toBeGreaterThan(0);
+    });
+  });
 });
 
 // ============================================
@@ -1615,6 +1755,49 @@ describe("PatternValidator - Enhanced Features", () => {
       expect(result.valid).toBe(true);
       expect(result.warnings).toBeDefined();
       expect(result.warnings?.some((w) => w.includes("simple text search"))).toBe(true);
+    });
+  });
+
+  describe("Multi-line pattern warnings", () => {
+    test("does not warn on patterns with 1-2 newlines", () => {
+      const result1 = PatternValidator.validatePattern("if $COND:\\n    $BODY");
+      expect(result1.valid).toBe(true);
+      const hasMultilineWarning1 = result1.warnings?.some((w) => w.includes("explicit newlines"));
+      expect(hasMultilineWarning1).toBeFalsy();
+
+      const result2 = PatternValidator.validatePattern("if $COND:\\n    $BODY1\\n    $BODY2");
+      expect(result2.valid).toBe(true);
+      const hasMultilineWarning2 = result2.warnings?.some((w) => w.includes("explicit newlines"));
+      expect(hasMultilineWarning2).toBeFalsy();
+    });
+
+    test("warns on patterns with 3+ newlines", () => {
+      const pattern = "if $COND:\\n    return $RET1\\nelse:\\n    return $RET2";
+      const result = PatternValidator.validatePattern(pattern);
+      expect(result.valid).toBe(true);
+      expect(result.warnings).toBeDefined();
+      expect(result.warnings?.some((w) => w.includes("3 explicit newlines"))).toBe(true);
+      expect(result.warnings?.some((w) => w.includes("may timeout"))).toBe(true);
+      expect(result.warnings?.some((w) => w.includes("structural rules"))).toBe(true);
+    });
+
+    test("warns on patterns with many newlines", () => {
+      const pattern = "def $FUNC($$$PARAMS):\\n    $LINE1\\n    $LINE2\\n    $LINE3\\n    $LINE4\\n    return $RET";
+      const result = PatternValidator.validatePattern(pattern);
+      expect(result.valid).toBe(true);
+      expect(result.warnings).toBeDefined();
+      expect(result.warnings?.some((w) => w.includes("5 explicit newlines"))).toBe(true);
+    });
+
+    test("counts only escaped newlines, not literal newlines", () => {
+      // Pattern with actual newline characters (not \n escape sequences)
+      const patternWithLiteralNewlines = `if $COND:
+    return $RET`;
+      const result = PatternValidator.validatePattern(patternWithLiteralNewlines);
+      expect(result.valid).toBe(true);
+      // Should not warn because we're counting \\n escape sequences, not literal newlines
+      const hasMultilineWarning = result.warnings?.some((w) => w.includes("explicit newlines"));
+      expect(hasMultilineWarning).toBeFalsy();
     });
   });
 });

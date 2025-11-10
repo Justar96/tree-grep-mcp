@@ -12,6 +12,12 @@ import {
 } from "../utils/validation.js";
 import type { Rule } from "../types/rules.js";
 import { hasPositiveKey } from "../types/rules.js";
+import type {
+  InspectGranularity,
+  JsonStyle,
+  NoIgnoreOption,
+  SeverityOverrideConfig,
+} from "../types/cli.js";
 
 interface WhereConstraint {
   metavariable: string;
@@ -33,8 +39,24 @@ interface ScanParams {
   severity?: "error" | "warning" | "info";
   paths?: string[];
   code?: string;
+  context?: number;
+  before?: number;
+  after?: number;
   timeoutMs?: number;
   verbose?: boolean;
+  strictness?: "cst" | "smart" | "ast" | "relaxed" | "signature";
+  globs?: string[];
+  noIgnore?: NoIgnoreOption[];
+  followSymlinks?: boolean;
+  threads?: number;
+  inspect?: InspectGranularity;
+  jsonStyle?: JsonStyle;
+  includeMetadata?: boolean;
+  format?: "github";
+  config?: string;
+  filter?: string;
+  severityOverrides?: SeverityOverrideConfig;
+  maxDepth?: number;
 }
 
 interface FindingLocation {
@@ -119,6 +141,18 @@ export class ScanTool {
       throw new ValidationError("timeoutMs must be a number");
     }
 
+    if (paramsRaw.strictness !== undefined) {
+      const validStrictness = ["cst", "smart", "ast", "relaxed", "signature"] as const;
+      if (
+        typeof paramsRaw.strictness !== "string" ||
+        !validStrictness.includes(paramsRaw.strictness as (typeof validStrictness)[number])
+      ) {
+        throw new ValidationError(
+          `strictness must be one of: ${validStrictness.join(", ")}`
+        );
+      }
+    }
+
     // Validate paths array
     if (paramsRaw.paths !== undefined) {
       if (!Array.isArray(paramsRaw.paths)) {
@@ -170,6 +204,23 @@ export class ScanTool {
       }
     }
 
+    if (paramsRaw.config !== undefined && typeof paramsRaw.config !== "string") {
+      throw new ValidationError("config must be a string path to sgconfig.yml");
+    }
+
+    if (paramsRaw.filter !== undefined && typeof paramsRaw.filter !== "string") {
+      throw new ValidationError("filter must be a string (regular expression)");
+    }
+
+    if (
+      paramsRaw.severityOverrides !== undefined &&
+      (typeof paramsRaw.severityOverrides !== "object" ||
+        paramsRaw.severityOverrides === null ||
+        Array.isArray(paramsRaw.severityOverrides))
+    ) {
+      throw new ValidationError("severityOverrides must be an object");
+    }
+
     // After validation, safely cast to ScanParams
     const params: ScanParams = {
       id: paramsRaw.id,
@@ -183,18 +234,185 @@ export class ScanTool {
       timeoutMs: paramsRaw.timeoutMs as number | undefined,
       paths: paramsRaw.paths as string[] | undefined,
       where: paramsRaw.where as WhereConstraint[] | undefined,
+      strictness: paramsRaw.strictness as ScanParams["strictness"],
+      context: paramsRaw.context as number | undefined,
+      before: paramsRaw.before as number | undefined,
+      after: paramsRaw.after as number | undefined,
+      globs: paramsRaw.globs as string[] | undefined,
+      noIgnore: paramsRaw.noIgnore as NoIgnoreOption[] | undefined,
+      followSymlinks: paramsRaw.followSymlinks as boolean | undefined,
+      threads: paramsRaw.threads as number | undefined,
+      inspect: paramsRaw.inspect as InspectGranularity | undefined,
+      jsonStyle: paramsRaw.jsonStyle as JsonStyle | undefined,
+      includeMetadata: paramsRaw.includeMetadata as boolean | undefined,
+      format: paramsRaw.format as "github" | undefined,
+      config: paramsRaw.config as string | undefined,
+      filter: paramsRaw.filter as string | undefined,
+      severityOverrides: paramsRaw.severityOverrides as SeverityOverrideConfig | undefined,
     };
+
+    const contextValidation = ParameterValidator.validateContext(params.context);
+    if (!contextValidation.valid) {
+      throw new ValidationError(contextValidation.errors.join("; "), {
+        errors: contextValidation.errors,
+      });
+    }
+
+    const beforeValidation = ParameterValidator.validateContextWindow("before", params.before);
+    if (!beforeValidation.valid) {
+      throw new ValidationError(beforeValidation.errors.join("; "), {
+        errors: beforeValidation.errors,
+      });
+    }
+
+    const afterValidation = ParameterValidator.validateContextWindow("after", params.after);
+    if (!afterValidation.valid) {
+      throw new ValidationError(afterValidation.errors.join("; "), {
+        errors: afterValidation.errors,
+      });
+    }
+
+    const contextComboValidation = ParameterValidator.validateContextCombination(
+      params.context,
+      params.before,
+      params.after
+    );
+    if (!contextComboValidation.valid) {
+      throw new ValidationError(contextComboValidation.errors.join("; "), {
+        errors: contextComboValidation.errors,
+      });
+    }
+
+    const globsValidation = ParameterValidator.validateGlobs(params.globs);
+    if (!globsValidation.valid) {
+      throw new ValidationError(globsValidation.errors.join("; "), {
+        errors: globsValidation.errors,
+      });
+    }
+
+    const noIgnoreValidation = ParameterValidator.validateNoIgnore(params.noIgnore);
+    if (!noIgnoreValidation.valid) {
+      throw new ValidationError(noIgnoreValidation.errors.join("; "), {
+        errors: noIgnoreValidation.errors,
+      });
+    }
+
+    const followValidation = ParameterValidator.validateBooleanOption(
+      params.followSymlinks,
+      "followSymlinks"
+    );
+    if (!followValidation.valid) {
+      throw new ValidationError(followValidation.errors.join("; "), {
+        errors: followValidation.errors,
+      });
+    }
+
+    const includeMetadataValidation = ParameterValidator.validateBooleanOption(
+      params.includeMetadata,
+      "includeMetadata"
+    );
+    if (!includeMetadataValidation.valid) {
+      throw new ValidationError(includeMetadataValidation.errors.join("; "), {
+        errors: includeMetadataValidation.errors,
+      });
+    }
+
+    const threadsValidation = ParameterValidator.validateThreads(params.threads);
+    if (!threadsValidation.valid) {
+      throw new ValidationError(threadsValidation.errors.join("; "), {
+        errors: threadsValidation.errors,
+      });
+    }
+
+    const inspectValidation = ParameterValidator.validateInspect(params.inspect);
+    if (!inspectValidation.valid) {
+      throw new ValidationError(inspectValidation.errors.join("; "), {
+        errors: inspectValidation.errors,
+      });
+    }
+
+    const jsonStyleValidation = ParameterValidator.validateJsonStyle(params.jsonStyle);
+    if (!jsonStyleValidation.valid) {
+      throw new ValidationError(jsonStyleValidation.errors.join("; "), {
+        errors: jsonStyleValidation.errors,
+      });
+    }
+
+    const formatValidation = ParameterValidator.validateFormat(params.format);
+    if (!formatValidation.valid) {
+      throw new ValidationError(formatValidation.errors.join("; "), {
+        errors: formatValidation.errors,
+      });
+    }
+
+    const severityOverridesValidation = ParameterValidator.validateSeverityOverrides(
+      params.severityOverrides
+    );
+    if (!severityOverridesValidation.valid) {
+      throw new ValidationError(severityOverridesValidation.errors.join("; "), {
+        errors: severityOverridesValidation.errors,
+      });
+    }
+
+    // Validate maxDepth early if provided (needed for config path validation)
+    if (params.maxDepth !== undefined) {
+      if (typeof params.maxDepth !== "number" || !Number.isFinite(params.maxDepth)) {
+        throw new ValidationError("maxDepth must be a finite number");
+      }
+      if (params.maxDepth < 1 || params.maxDepth > 20) {
+        throw new ValidationError("maxDepth must be between 1 and 20");
+      }
+    }
+
+    // Create workspace manager with custom maxDepth if provided
+    const workspaceManager = params.maxDepth !== undefined
+      ? new WorkspaceManager({
+          explicitRoot: this.workspaceManager.getWorkspaceRoot(),
+          maxDepth: params.maxDepth
+        })
+      : this.workspaceManager;
+
+    const configValue = typeof params.config === "string" ? params.config.trim() : undefined;
+    const hasConfig = Boolean(configValue);
+    let normalizedConfigPath: string | undefined;
+    if (hasConfig && configValue) {
+      if (!path.isAbsolute(configValue)) {
+        throw new ValidationError("config path must be absolute (e.g., /workspace/app/sgconfig.yml)");
+      }
+      normalizedConfigPath = PathValidator.normalizePath(configValue);
+      const { valid, errors } = workspaceManager.validatePaths([normalizedConfigPath]);
+      if (!valid) {
+        throw new ValidationError(errors[0] || "Invalid config path", { errors });
+      }
+      params.config = normalizedConfigPath;
+    } else {
+      params.config = undefined;
+    }
+
+    const filterValue = typeof params.filter === "string" ? params.filter.trim() : undefined;
+    const hasFilter = Boolean(filterValue);
+    if (hasFilter && filterValue) {
+      params.filter = filterValue;
+    } else {
+      params.filter = undefined;
+    }
 
     // Support two modes:
     // Mode 1 (existing): Simple pattern string + optional where constraints
     // Mode 2 (new): Complex rule object with kind, has, inside, all, any, not, matches, etc.
-    const hasPattern = params.pattern && typeof params.pattern === "string";
-    const hasRule = params.rule && typeof params.rule === "object" && !Array.isArray(params.rule);
+    const hasPattern = !!(params.pattern && typeof params.pattern === "string");
+    const hasRule = !!(params.rule && typeof params.rule === "object" && !Array.isArray(params.rule));
+    const hasConfigMode = hasConfig || hasFilter;
 
-    if (!hasPattern && !hasRule) {
+    if (!hasPattern && !hasRule && !hasConfigMode) {
       throw new ValidationError(
-        "Either pattern (string) or rule (object) is required. " +
-          "Use pattern for simple matching, or rule for structural rules with kind, has, inside, etc."
+        "Provide either pattern/rule inputs or config/filter parameters to select rules."
+      );
+    }
+
+    if ((hasPattern || hasRule) && hasConfigMode) {
+      throw new ValidationError(
+        "Cannot combine config/filter scanning with inline pattern or rule parameters."
       );
     }
 
@@ -203,6 +421,18 @@ export class ScanTool {
         "Cannot specify both pattern and rule parameters. " +
           "Use pattern for simple matching, or rule for structural rules."
       );
+    }
+
+    if (hasConfigMode) {
+      if (params.where && params.where.length > 0) {
+        throw new ValidationError("where constraints are only supported for inline pattern/rule mode");
+      }
+      if (params.fix) {
+        throw new ValidationError("fix templates require inline pattern/rule mode");
+      }
+      if (params.strictness) {
+        throw new ValidationError("strictness is only applicable when using inline pattern mode");
+      }
     }
 
     // Validate rule ID format
@@ -389,11 +619,23 @@ export class ScanTool {
             constraint.hasOwnProperty("not_equals") &&
             typeof constraint.not_equals === "string" &&
             constraint.not_equals.trim().length > 0;
+          const hasKind =
+            constraint.hasOwnProperty("kind") &&
+            typeof constraint.kind === "string" &&
+            constraint.kind.trim().length > 0;
 
-          if (!hasRegex && !hasEquals && !hasNotRegex && !hasNotEquals) {
+          if (!hasRegex && !hasEquals && !hasNotRegex && !hasNotEquals && !hasKind) {
             throw new ValidationError(
               `Constraint on metavariable '${constraint.metavariable}' must specify at least one operator: regex, equals, not_regex, not_equals, or kind`
             );
+          }
+
+          // Validate kind format early if present
+          if (hasKind && constraint.kind) {
+            const kindValidation = ParameterValidator.validateConstraintKind(constraint.kind);
+            if (!kindValidation.valid) {
+              throw new ValidationError(kindValidation.errors.join("; "));
+            }
           }
 
           // Validate only one positive operator
@@ -420,84 +662,156 @@ export class ScanTool {
       }
     }
 
-    // Determine if we should use 'run' or 'scan' mode
-    // ast-grep v0.39.7+ requires scan rules to have AST kind specification
-    // For simple pattern-only rules without constraints/fix, use 'run' mode
-    // Note: run mode doesn't support constraints or fix, so use scan mode if those are present
-    const useRunMode = params.pattern && !params.rule && !params.where && !params.fix;
+    // Determine execution mode
+    // - Run mode: simple pattern-only rules (no constraints/fix) and no config/filter
+    // - Rule mode: dynamically generated YAML rule (-rule)
+    // - Config mode: use existing sgconfig/filters (no temporary files)
+    const useRunMode =
+      hasPattern && !hasConfigMode && !params.rule && !params.where && !params.fix;
+    const useRuleMode = !useRunMode && !hasConfigMode;
 
-    // Generate YAML rule (only needed for scan mode)
-    const yaml = useRunMode
-      ? ""
-      : this.buildYaml({ ...params, language: normalizeLang(params.language) });
+    if (params.includeMetadata && useRunMode) {
+      throw new ValidationError("--include-metadata requires scan mode. Provide rule/constraints/fix.");
+    }
 
-    // Create temporary rule file with unique name (only for scan mode)
+    if (params.format && useRunMode) {
+      throw new ValidationError("--format is only available in scan mode.");
+    }
+
+    if (useRunMode && params.severityOverrides) {
+      throw new ValidationError("severityOverrides apply only to scan mode");
+    }
+
+    // Generate YAML rule (only needed for rule mode)
+    const yaml = useRuleMode
+      ? this.buildYaml({ ...params, language: normalizeLang(params.language) })
+      : "";
+
+    // Create temporary rule file with unique name (only for rule mode)
     const tempDir = os.tmpdir();
     const randomSuffix = Math.random().toString(36).substring(2, 15);
-    const rulesFile = useRunMode
-      ? ""
-      : path.join(tempDir, `rule-${Date.now()}-${randomSuffix}.yml`);
-
-    let tempCodeFileForCleanup: string | null = null;
+    const rulesFile = useRuleMode
+      ? path.join(tempDir, `rule-${Date.now()}-${randomSuffix}.yml`)
+      : "";
     try {
-      if (!useRunMode) {
+      if (useRuleMode) {
         await fs.writeFile(rulesFile, yaml, "utf8");
       }
 
-      // Build command based on mode
       const args: string[] = [];
+      const jsonStyle = params.jsonStyle || "stream";
+
       if (useRunMode) {
-        // Use 'run' mode for simple patterns
         args.push(
           "run",
           "--pattern",
           params.pattern!.trim(),
           "--lang",
-          normalizeLang(params.language),
-          "--json=stream"
+          normalizeLang(params.language)
         );
+        if (params.strictness) {
+          args.push("--strictness", params.strictness);
+        }
+      } else if (useRuleMode) {
+        args.push("scan", "--rule", PathValidator.normalizePath(rulesFile));
       } else {
-        // Use 'scan' mode for structural rules
-        args.push("scan", "--rule", PathValidator.normalizePath(rulesFile), "--json=stream");
+        args.push("scan");
+        if (hasConfig && normalizedConfigPath) {
+          args.push("--config", normalizedConfigPath);
+        }
+        if (hasFilter && params.filter) {
+          args.push("--filter", params.filter);
+        }
       }
 
-      // Add paths or inline code via temp file
-      let tempCodeFile: string | null = null;
-      if (params.code) {
-        const extMap: Record<string, string> = {
-          js: "js",
-          ts: "ts",
-          jsx: "jsx",
-          tsx: "tsx",
-          py: "py",
-          rs: "rs",
-          go: "go",
-          java: "java",
-          cpp: "cpp",
-          c: "c",
-          kt: "kt",
+      args.push(`--json=${jsonStyle}`);
+
+      if (params.context && params.context > 0) {
+        args.push("--context", params.context.toString());
+      }
+
+      if (typeof params.before === "number" && params.before > 0) {
+        args.push("--before", params.before.toString());
+      }
+
+      if (typeof params.after === "number" && params.after > 0) {
+        args.push("--after", params.after.toString());
+      }
+
+      if (params.globs && params.globs.length > 0) {
+        for (const glob of params.globs) {
+          args.push("--globs", glob);
+        }
+      }
+
+      if (params.noIgnore && params.noIgnore.length > 0) {
+        for (const ignoreType of params.noIgnore) {
+          args.push("--no-ignore", ignoreType);
+        }
+      }
+
+      if (params.followSymlinks) {
+        args.push("--follow");
+      }
+
+      if (typeof params.threads === "number") {
+        args.push("--threads", params.threads.toString());
+      }
+
+      if (params.inspect) {
+        args.push("--inspect", params.inspect);
+      }
+
+      if (!useRunMode && params.includeMetadata) {
+        args.push("--include-metadata");
+      }
+
+      if (!useRunMode && params.format) {
+        args.push("--format", params.format);
+      }
+
+      if (!useRunMode && params.severityOverrides) {
+        const pushOverride = (flag: string, value?: SeverityOverrideConfig[keyof SeverityOverrideConfig]) => {
+          if (value === undefined) return;
+          if (value === true) {
+            args.push(`--${flag}`);
+            return;
+          }
+          for (const ruleId of value) {
+            args.push(`--${flag}=${ruleId}`);
+          }
         };
-        const ext = extMap[normalizeLang(params.language)] || "js";
-        const randomSuffix = Math.random().toString(36).substring(2, 15);
-        tempCodeFile = path.join(
-          os.tmpdir(),
-          `astgrep-inline-${Date.now()}-${randomSuffix}.${ext}`
-        );
-        await fs.writeFile(tempCodeFile, params.code, "utf8");
-        args.push(PathValidator.normalizePath(tempCodeFile));
-        tempCodeFileForCleanup = tempCodeFile;
+        pushOverride("error", params.severityOverrides.error);
+        pushOverride("warning", params.severityOverrides.warning);
+        pushOverride("info", params.severityOverrides.info);
+        pushOverride("hint", params.severityOverrides.hint);
+        pushOverride("off", params.severityOverrides.off);
+      }
+
+      const executeOptions: {
+        cwd: string;
+        timeout: number;
+        stdin?: string;
+      } = {
+        cwd: workspaceManager.getWorkspaceRoot(),
+        timeout: params.timeoutMs || 60000,
+      };
+
+      if (params.code) {
+        if (useRunMode && !params.language) {
+          throw new ValidationError("Language required for inline code");
+        }
+        args.push("--stdin");
+        executeOptions.stdin = params.code;
       } else {
-        // Only use "." as default when paths are omitted
         const pathsProvided =
           params.paths && Array.isArray(params.paths) && params.paths.length > 0;
         const inputPaths: string[] = pathsProvided && params.paths ? params.paths : ["."];
 
-        // Warn when scanning entire workspace with default path
         if (!pathsProvided) {
-          const workspaceRoot = this.workspaceManager.getWorkspaceRoot();
+          const workspaceRoot = workspaceManager.getWorkspaceRoot();
           const home = process.env.HOME || process.env.USERPROFILE || "";
 
-          // Prevent scanning from home directory or common user directories
           if (home && path.resolve(workspaceRoot) === path.resolve(home)) {
             throw new ValidationError(
               `Cannot scan from home directory without explicit paths. Please provide absolute paths to specific directories.`
@@ -521,12 +835,9 @@ export class ScanTool {
           );
         }
 
-        // Validate that paths are absolute
-        // Only allow "." when it's the default (paths not provided by client)
         for (const p of inputPaths) {
           if (!path.isAbsolute(p)) {
             if (p === "." || p === "") {
-              // "." or "" only allowed when paths were not provided (default case)
               if (pathsProvided) {
                 throw new ValidationError(
                   `Path must be absolute. Use '/workspace/src/' or 'C:/workspace/src/'`
@@ -540,18 +851,13 @@ export class ScanTool {
           }
         }
 
-        // Normalize paths for ast-grep compatibility (Windows -> forward slashes)
-        // Empty strings should be treated as current directory
         const normalizedPaths = inputPaths.map((p) =>
           p === "" ? "." : PathValidator.normalizePath(p)
         );
 
-        // Validate paths for security (but skip validation for default "." path)
-        // The "." path is relative and will be resolved by ast-grep in the workspace root
         if (pathsProvided) {
-          const { valid, errors } = this.workspaceManager.validatePaths(normalizedPaths);
+          const { valid, errors } = workspaceManager.validatePaths(normalizedPaths);
           if (!valid) {
-            // Replace normalized paths in error messages with original paths
             const originalErrors = errors.map((err) => {
               let modifiedErr = err;
               for (let i = 0; i < normalizedPaths.length; i++) {
@@ -565,14 +871,10 @@ export class ScanTool {
           }
         }
 
-        // Pass normalized paths to ast-grep (not absolute resolved paths)
         args.push(...normalizedPaths);
       }
 
-      const result = await this.binaryManager.executeAstGrep(args, {
-        cwd: this.workspaceManager.getWorkspaceRoot(),
-        timeout: params.timeoutMs || 30000,
-      });
+      const result = await this.binaryManager.executeAstGrep(args, executeOptions);
 
       const { findings, skippedLines } = this.parseFindings(result.stdout);
 
@@ -616,22 +918,12 @@ export class ScanTool {
       // Cleanup with logging
       const cleanupErrors: string[] = [];
 
-      if (!useRunMode && rulesFile) {
+      if (useRuleMode && rulesFile) {
         try {
           await fs.unlink(rulesFile);
         } catch (e) {
           cleanupErrors.push(
             `Failed to cleanup rule file: ${e instanceof Error ? e.message : String(e)}`
-          );
-        }
-      }
-
-      if (tempCodeFileForCleanup) {
-        try {
-          await fs.unlink(tempCodeFileForCleanup);
-        } catch (e) {
-          cleanupErrors.push(
-            `Failed to cleanup temp code file: ${e instanceof Error ? e.message : String(e)}`
           );
         }
       }
@@ -1067,249 +1359,258 @@ export class ScanTool {
   static getSchema() {
     return {
       name: "ast_run_rule",
-      description: `Generate and execute ast-grep YAML rules. Supports simple patterns with constraints, structural rules (kind/has/inside/all/any/not), fix suggestions, and severity levels. Returns generated YAML and scan findings.
+      description: `Generate and execute ast-grep YAML rules with constraints, fix suggestions, and severity levels.
 
-QUICK START:
-Simple pattern with constraint:
-{ "id": "no-var", "language": "javascript", "pattern": "var $NAME = $VALUE", "where": [{ "metavariable": "NAME", "regex": "^test" }] }
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚡ REQUIRED PARAMETERS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Structural rule with kind:
-{ "id": "match-expr", "language": "rust", "rule": { "kind": "match_expression" } }
+• id (string) - Rule identifier (kebab-case, e.g., "no-console-log")
+• language (string) - Programming language (js/ts/py/rust/go/java/cpp)
+• pattern (string) OR rule (object) - Choose ONE:
+  - pattern: Simple AST pattern string (e.g., "console.log($ARG)")
+  - rule: Complex structural rule object (e.g., { kind: "function_declaration" })
+• paths (array) - Absolute paths to scan (e.g., ["/workspace/src/"])
 
-Pattern with fix suggestion:
-{ "id": "modernize", "language": "javascript", "pattern": "var $N = $V", "fix": "const $N = $V", "severity": "warning" }
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🚀 QUICK START (Copy & Modify)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-WHEN TO USE:
-• Need constraints on metavariables (filter by name, pattern, exact value)
-• Want to provide automated fix suggestions
-• Need to categorize findings by severity (error/warning/info)
+1. Simple pattern with constraint:
+   { "id": "no-var", "language": "javascript", "pattern": "var $NAME = $VALUE", "where": [{ "metavariable": "NAME", "regex": "^test" }], "paths": ["/workspace/src/"] }
+
+2. Pattern with fix suggestion:
+   { "id": "modernize", "language": "javascript", "pattern": "var $N = $V", "fix": "const $N = $V", "severity": "warning", "paths": ["/workspace/src/"] }
+
+3. Structural rule (match by AST node type):
+   { "id": "match-expr", "language": "rust", "rule": { "kind": "match_expression" }, "paths": ["/workspace/src/"] }
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔧 TROUBLESHOOTING FAILURES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. ❌ "Metavariable $VAR in constraint not found in pattern"
+   → Ensure constraint metavariables exist in pattern
+   → Example: pattern="foo($A)" where=[{metavariable: "B", ...}] is INVALID
+   → Fix: pattern="foo($A)" where=[{metavariable: "A", ...}]
+
+2. ❌ "Metavariable $VAR in fix not found in pattern"
+   → Ensure fix metavariables exist in pattern
+   → Example: pattern="foo($A)" fix="bar($B)" is INVALID
+   → Fix: pattern="foo($A)" fix="bar($A)"
+
+3. ❌ "Invalid rule ID format"
+   → Use kebab-case: "no-console-log" not "noConsoleLog" or "no_console_log"
+
+4. ❌ "Provide either pattern or rule, not both"
+   → Choose ONE: pattern (simple) OR rule (structural)
+
+5. ✓ No error but findings: [] (empty array)
+   → Rule is valid but matched nothing
+   → Test pattern with ast_search first to verify matches
+   → Check constraint logic (too restrictive?)
+
+WHEN TO USE THIS TOOL:
+• Need constraints on metavariables (filter by name, pattern, value)
+• Want automated fix suggestions
+• Need severity levels (error/warning/info)
 • Building reusable code quality rules
-• Structural matching with kind, has, inside, all, any, not operators
-• Pattern objects with selector/context/strictness for disambiguation
 
 WHEN NOT TO USE:
-• Simple search without constraints → Use ast_search
+• Simple search without constraints → Use ast_search (faster)
 • Want to apply changes immediately → Use ast_replace
 • Quick codebase exploration → Use ast_search
-• Simple text matching → Use grep/ripgrep instead
-• Regex-only patterns → ast-grep requires AST structure, use grep with regex
-• Control flow analysis (complex if/with/try blocks) → Limited support
 
-RULE MODES (Automatic Detection):
-This tool automatically detects rule complexity based on parameters provided:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📝 CONSTRAINT SYNTAX (where parameter)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-1. Simple Pattern Mode: Provide 'pattern' parameter
-   - AST pattern string with optional constraints
-   - Example: { pattern: "console.log($ARG)", where: [{ metavariable: "ARG", regex: ".*" }] }
+Constraints filter metavariables by regex, exact value, or AST node type:
 
-2. Structural Rule Mode: Provide 'rule' parameter
-   - Complex rule object with kind, relational, or composite operators
-   - Example: { rule: { kind: "function_declaration", has: { pattern: "await $E", stopBy: "end" } } }
-
-NOTE: Provide either 'pattern' OR 'rule', not both
-
-STRUCTURAL RULES:
-Structural rules enable advanced matching beyond simple patterns:
-
-1. Kind Rules - Match by AST node type:
-   { rule: { kind: "match_expression" } }
-   Matches Rust match expressions by tree-sitter node type.
-
-2. Relational Rules - Match based on relationships (inside, has, precedes, follows):
-   { rule: { kind: "function_declaration", has: { pattern: "await $E", stopBy: "end" } } }
-   Matches functions containing await.
-
-   **CRITICAL: Always use stopBy: "end" for relational rules (inside, has, precedes, follows)**
-   - Without stopBy: "end", search stops at nearest non-matching node (may miss matches)
-   - With stopBy: "end", search continues to root (inside) or leaf (has) nodes
-   - Default behavior (stopBy: "neighbor") often insufficient for thorough matching
-
-3. Pattern Objects - Disambiguate with selector/context/strictness:
-   { rule: { pattern: { selector: "type_parameters", context: "function $F<$T>()" } } }
-   Matches TypeScript generic function type parameters.
-
-4. Composite Rules - Combine conditions (all=AND, any=OR, not=NOT):
-   { rule: { all: [{ kind: "call_expression" }, { pattern: "console.log($M)" }] } }
-   Matches nodes satisfying ALL sub-rules.
-
-METAVARIABLE RULES:
-• $VAR - Single node, must be complete AST node ($OBJ.$PROP not $VAR.prop)
-  - Examples: $ARG, $NAME, $VALUE, $OBJ, $PROP
-  - Naming: UPPER_CASE or UPPER_SNAKE_CASE recommended
-• $$$NAME - Multiple nodes, must be named (bare $$$ rejected)
-  - Examples: $$$ARGS, $$$PARAMS, $$$BODY, $$$ITEMS
-  - Matches: zero or more AST nodes in sequence
-  - Always requires a name (bare $$$ will be rejected with validation error)
-• $_ - Anonymous match (cannot reference in constraints/fix)
-  - Use when you don't need to reference the match
-• All metavariables in constraints/fix must exist in pattern
-• Multi-node metavariables must always be named
-• Case-sensitive: $VAR and $var are different metavariables
-
-CONSTRAINT EXAMPLES:
-
-1. Regex pattern matching:
+1. Match by regex:
    where: [{ metavariable: "NAME", regex: "^test" }]
-   Matches: const testVar = 1  |  Doesn't match: const myVar = 1
+   ✓ Matches: const testVar = 1
+   ✗ Doesn't match: const myVar = 1
 
-2. Exact value matching:
-   where: [{ metavariable: "OBJ", equals: "console" }, { metavariable: "METHOD", equals: "log" }]
-   Matches: console.log(...)  |  Doesn't match: logger.log(...)
+2. Match exact value:
+   where: [{ metavariable: "OBJ", equals: "console" }]
+   ✓ Matches: console.log(...)
+   ✗ Doesn't match: logger.log(...)
 
-3. Numeric values only:
-   where: [{ metavariable: "DURATION", regex: "^[0-9]+$" }]
-   Matches: timeout(5000)  |  Doesn't match: timeout(CONSTANT)
-
-4. Exclude with not_regex:
+3. Exclude by regex:
    where: [{ metavariable: "NAME", not_regex: "^_" }]
-   Matches: const publicVar = 1  |  Doesn't match: const _privateVar = 1
+   ✓ Matches: const publicVar = 1
+   ✗ Doesn't match: const _privateVar = 1
 
-5. Exclude exact values with not_equals:
+4. Exclude exact value:
    where: [{ metavariable: "METHOD", not_equals: "log" }]
-   Matches: console.error(...)  |  Doesn't match: console.log(...)
+   ✓ Matches: console.error(...)
+   ✗ Doesn't match: console.log(...)
 
-6. AST node type matching with kind:
+5. Match by AST node type:
    where: [{ metavariable: "ARG", kind: "identifier" }]
-   Matches: console.log(myVar)  |  Doesn't match: console.log("string")
+   ✓ Matches: console.log(myVar)
+   ✗ Doesn't match: console.log("string")
 
-7. Combining constraints:
+6. Combine constraints (AND logic):
    where: [{ metavariable: "NAME", regex: "^[a-z]", kind: "identifier" }]
    Matches identifiers starting with lowercase letter
 
-FIX TEMPLATE EXAMPLES:
+CRITICAL: All constraint metavariables MUST exist in pattern!
+✓ pattern="foo($A)" where=[{metavariable: "A", ...}]
+✗ pattern="foo($A)" where=[{metavariable: "B", ...}] (validation error)
 
-1. Simple replacement: pattern="console.log($A)" fix="logger.info($A)"
-2. Reordering: pattern="assertEquals($E, $A)" fix="assertEquals($A, $E)"
-3. Adding context: pattern="throw new Error($M)" fix="throw new Error(\`[MODULE] \${$M}\`)"
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔨 FIX TEMPLATES (fix parameter)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-PATTERN LIBRARY:
-For more pattern examples, see: https://github.com/justar96/tree-grep-mcp/blob/main/PATTERN_LIBRARY.md
+Fix templates provide automated fix suggestions (not applied automatically):
 
-SEVERITY LEVELS:
-• error: Critical bugs or runtime failures
-• warning: Should be changed but won't break (default)
-• info: Suggestions for improvement, style issues
+pattern: "var $NAME = $VALUE"
+fix: "const $NAME = $VALUE"
+→ Suggests replacing var with const
 
-ERROR RECOVERY:
+CRITICAL: All fix metavariables MUST exist in pattern!
+✓ pattern="foo($A)" fix="bar($A)"
+✗ pattern="foo($A)" fix="bar($B)" (validation error)
 
-If rule execution fails, check these common issues:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🏗️ STRUCTURAL RULES (rule parameter)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-1. "Either pattern (string) or rule (object) is required"
-   → Provide either pattern parameter OR rule parameter, not both
-   → Example (pattern mode): { pattern: "console.log($A)", ... }
-   → Example (rule mode): { rule: { kind: "function_declaration" }, ... }
+Advanced matching beyond simple patterns:
 
-2. "Rule object must have at least one positive key"
-   → Rule object needs pattern, kind, regex, inside, has, all, any, or matches
-   → Example: { rule: { kind: "match_expression" } }
+1. Kind Rules - Match by AST node type:
+   rule: { kind: "match_expression" }
+   Matches Rust match expressions
 
-3. "Metavariable $X used in constraint/fix but not in pattern"
-   → All constraint/fix metavariables must be defined in pattern
-   → Fix: Add $X to pattern or remove from constraint/fix
+2. Relational Rules - Match based on relationships:
+   rule: { kind: "function_declaration", has: { pattern: "await $E", stopBy: "end" } }
+   Matches functions containing await
 
-4. "Invalid pattern: Use named multi-node metavariables like $$ARGS"
-   → Replace "$$$" with "$$$NAME"
-   → Bare $$$ is rejected
+   ⚠️ CRITICAL: Always use stopBy: "end" for relational rules!
+   Without it, search stops too early and misses matches.
 
-5. "Language required for inline code"
-   → Language is always required parameter (for both inline and file modes)
-   → Example: { id: "r", language: "javascript", pattern: "...", code: "..." }
+3. Pattern Objects - Disambiguate with selector/context:
+   rule: { pattern: { selector: "type_parameters", context: "function $F<$T>()" } }
+   Matches TypeScript generic function type parameters
 
-6. "Invalid paths"
-   → Use absolute paths like '/workspace/src/' or 'C:/workspace/src/'
-   → Relative paths are not supported (will be rejected with validation error)
-   → Paths validated against workspace root for security
-   → Omit paths to scan entire workspace (defaults to current directory)
+4. Composite Rules - Combine conditions (all=AND, any=OR, not=NOT):
+   rule: { all: [{ kind: "call_expression" }, { pattern: "console.log($M)" }] }
+   Matches nodes satisfying ALL sub-rules
 
-7. Empty scan.findings array (no matches)
-   → Rule is valid but matched nothing (not an error)
-   → **If using relational rules, add stopBy: "end" to ensure thorough search**
-   → Test with inline code first to verify rule logic
-   → Check pattern syntax matches language AST
-   → Try simpler pattern first, then add complexity
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📝 METAVARIABLE RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-8. Relational rule not matching expected code
-   → **Add stopBy: "end" to relational rule (inside/has/precedes/follows)**
-   → Default stopBy: "neighbor" only searches immediate surrounding nodes
-   → Example: { has: { pattern: "await $E", stopBy: "end" } }
+$VAR - Single AST node (expression, identifier, statement)
+  Examples: $ARG, $NAME, $VALUE, $OBJ, $PROP
+  Usage: "console.log($ARG)" matches console.log(anything)
 
-9. Timeout errors
-   → Increase timeoutMs (default: 30000ms, max: 300000ms)
-   → Narrow paths to specific directories
-   → Simplify pattern or constraints
-   → Recommended by repo size:
-     Small (<1K files): 30000ms (default)
-     Medium (1K-10K): 60000-120000ms
-     Large (>10K): 120000-300000ms
+$$$NAME - Multiple nodes (MUST be named, bare $$$ rejected)
+  Examples: $$$ARGS, $$$PARAMS, $$$BODY
+  Usage: "foo($$$ARGS)" matches foo(), foo(1), foo(1,2,3)
 
-OUTPUT STRUCTURE:
-• yaml: Generated YAML rule (can be saved for reuse)
-• scan.findings: Array of { file, line, column, message, severity }
-• scan.summary: { totalFindings, errors, warnings, info }
-• All findings returned (no truncation)
+$_ - Anonymous match (cannot reference in constraints/fix)
+  Usage: "foo($_, $_, $_)" matches exactly 3 arguments
 
-OPERATION MODES:
+Rules:
+• Must be complete AST nodes: "$OBJ.$PROP" not "$VAR.prop"
+• Multi-node must be named: "$$$ARGS" not "$$$"
+• Case-sensitive: $VAR and $var are different
+• All metavariables in constraints/fix must exist in pattern
 
-Inline Code Mode (testing):
-• Use code parameter to test rules on snippets
-• Language parameter REQUIRED
-• Example: { id: "r", language: "js", pattern: "var $N = $V", code: "var x = 1;" }
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚙️ ADVANCED OPTIONS (Optional)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-File Mode (scanning):
-• Use paths or omit for entire workspace
-• Language parameter REQUIRED
-• Example: { id: "r", language: "js", pattern: "var $N = $V", paths: ["/workspace/src/"] }
+Severity Levels:
+• severity: "error" - Critical bugs or runtime failures
+• severity: "warning" - Should be changed but won't break (default)
+• severity: "info" - Suggestions for improvement, style issues
 
-JSX/TSX Patterns:
-• Set language to 'jsx' or 'tsx'
-• Element matching: "<$COMPONENT $$$ATTRS>" or "<$TAG>$$$CHILDREN</$TAG>"
-• Attribute matching: "<Button onClick={$HANDLER}>"
-• WARNING: Broad patterns like "<$TAG>" match thousands of elements - add constraints
+File Filtering:
+• globs: ["**/*.test.ts", "!**/node_modules/**"] - Include/exclude patterns
+• noIgnore: ["hidden", "dot"] - Search hidden files
+• followSymlinks: true - Follow symbolic links (default: false)
 
-CONSTRAINT OPERATORS:
-• regex - Match with regular expression pattern
-• equals - Match exact string value
-• not_regex - Exclude matches with regular expression pattern
-• not_equals - Exclude exact string value
-• kind - Match specific AST node type (e.g., identifier, string_literal)
+Performance:
+• threads: 4 - Parallel threads (default: 0 = auto-detect)
+• timeoutMs: 60000 - Timeout in ms (default: 30000, max: 300000)
+• maxDepth: 15 - Max directory depth from workspace root (1-20, default: 10)
 
-CONSTRAINT RULES:
-• Each constraint must specify at least one operator
-• Mutually exclusive: Cannot combine 'regex' and 'equals' for same metavariable
-• Mutually exclusive: Cannot combine 'not_regex' and 'not_equals' for same metavariable
-• 'kind' can be combined with any positive or negative operator
-• Multiple constraints can target different metavariables
-• kind values must be lowercase with underscores (e.g., function_declaration)
+Context:
+• context: 3 - Lines around finding (0-100)
+• before: 2, after: 5 - Asymmetric context (conflicts with context)
 
-BEST PRACTICES:
-• **ALWAYS use stopBy: "end" for relational rules** (inside, has, precedes, follows)
-• Use for code quality enforcement and architectural analysis
-• Test rules on inline code before scanning large codebases
-• Start with simple patterns, add constraints to narrow matches
-• Use structural rules (kind/has/inside) for complex matching
-• Specify language for better parsing and validation
-• Break complex rules into smaller, composable utility rules
-• When debugging, if relational rules don't match, add stopBy: "end" first
+Output:
+• jsonStyle: "stream" - Format: stream/pretty/compact
+• includeMetadata: true - Include rule metadata (default: false)
+• format: "github" - GitHub Actions annotations
 
-LIMITATIONS:
-• Paths must be within workspace root (security constraint)
-• Path depth limited to 6 levels from workspace root (use parent directories for deep paths)
-• Fix templates cannot perform complex transformations
-• Temporary YAML files created and cleaned up automatically
-• Control flow patterns (if/with/try blocks) have limited support
-• Multi-line patterns with newlines may not match - prefer single-line or structural rules
-• Not suitable for simple text matching - use grep/ripgrep instead
-• Constraints support regex and equals only (no complex logic)
-• Indentation-sensitive for multi-line patterns
+Configuration:
+• config: "/path/to/sgconfig.yml" - Project-wide rule configuration
+• filter: "^no-" - Filter rules by ID regex
+• severityOverrides: { error: ["rule-id"], warning: ["other-id"] }
 
-REFERENCE - MCP to ast-grep CLI Mapping:
-id, language, pattern/rule, severity, message, where, fix → YAML file (temp)
-paths → positional arguments
-code → temp file with extension
-timeoutMs → process timeout (not a CLI flag)
+Debugging:
+• inspect: "summary" - Show scan stats (nothing/summary/entity)
+• verbose: false - Simplified output (default: true)
+• strictness: "smart" - Match precision (cst/smart/ast/relaxed/signature)
 
-Example: { id: "no-var", pattern: "var $N = $V", language: "js", paths: ["/workspace/src/"] }
-CLI: ast-grep scan --rule <temp-rule.yml> --json=stream /workspace/src/`,
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+💡 BEST PRACTICES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. ⚠️ ALWAYS use stopBy: "end" for relational rules (inside/has/precedes/follows)
+2. Test rules on inline code before scanning large codebases
+3. Start with simple patterns, add constraints to narrow matches
+4. Use ast_search first to verify pattern matches correctly
+5. Break complex rules into smaller, composable utility rules
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📚 OUTPUT STRUCTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+{
+  yaml: "Generated YAML rule (can be saved for reuse)",
+  scan: {
+    findings: [{ file, line, column, message, severity }],
+    summary: { totalFindings, errors, warnings, info }
+  }
+}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📚 CLI FLAG MAPPING (For Reference)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+MCP Parameter → ast-grep CLI Flag:
+• pattern → Generates YAML rule with pattern field
+• rule → Generates YAML rule with rule field
+• where → Generates YAML constraints field
+• fix → Generates YAML fix field
+• severity → Generates YAML severity field
+• language → --lang <normalized> (javascript→js, typescript→ts, python→py)
+• code → --stdin (with stdin input)
+• paths → positional arguments (absolute paths)
+• config → --config <path>
+• filter → --filter <regex>
+• globs → --globs <pattern> (repeatable)
+• noIgnore → --no-ignore <option> (repeatable)
+• followSymlinks → --follow
+• threads → --threads <number>
+• inspect → --inspect <granularity>
+• includeMetadata → --include-metadata
+• format → --format <format>
+• severityOverrides → --error/--warning/--info/--hint/--off <rule-id>
+• context → --context <number>
+• before/after → --before/--after <number>
+• jsonStyle → --json=<style>
+
+Example: { id: "no-var", language: "js", pattern: "var $N = $V", where: [{metavariable: "N", regex: "^test"}], paths: ["/workspace/src/"] }
+→ Generates YAML rule file, then: ast-grep scan --rule <temp-rule-file> --lang js /workspace/src/
+
+Reference: AST_GREP_DOCUMENTS.md lines 575-814`,
 
       inputSchema: {
         type: "object",
@@ -1406,6 +1707,23 @@ CLI: ast-grep scan --rule <temp-rule.yml> --json=stream /workspace/src/`,
             type: "boolean",
             description:
               "Control output verbosity. Default: true. When false, returns simplified summary without detailed finding information. Useful in CLI to prevent excessive output.",
+          },
+          strictness: {
+            type: "string",
+            enum: ["cst", "smart", "ast", "relaxed", "signature"],
+            description:
+              "Pattern matching strictness (default: 'smart'). Only applies when using simple pattern mode (not structural rules). Controls how precisely patterns must match AST nodes:\n" +
+              "- cst: Match exact CST nodes (most strict, includes all syntax)\n" +
+              "- smart: Match AST nodes except trivial tokens like parentheses (default, recommended)\n" +
+              "- ast: Match only named AST nodes (ignores unnamed nodes)\n" +
+              "- relaxed: Match AST nodes except comments (good for commented code)\n" +
+              "- signature: Match AST structure without text content (matches any identifier/literal)\n" +
+              "Note: Ignored when using structural rules (rule parameter). See: https://ast-grep.github.io/advanced/match-algorithm.html",
+          },
+          maxDepth: {
+            type: "number",
+            description:
+              "Maximum directory depth for path validation (1-20). Default: 10. Controls how deep paths can be from workspace root. Example: maxDepth=5 allows /workspace/a/b/c/d/e/ but rejects /workspace/a/b/c/d/e/f/.",
           },
         },
         required: ["id", "language"],

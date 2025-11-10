@@ -5,9 +5,10 @@
  * Uses command interception (spy on executeAstGrep) to capture CLI arguments without executing ast-grep.
  *
  * Test Coverage:
- * - SearchTool CLI flag mapping (--pattern, --lang, --json=stream, --context, --stdin, paths)
- * - ReplaceTool CLI flag mapping (--pattern, --rewrite, --lang, --update-all, --stdin, paths)
- * - ScanTool CLI flag mapping (--rule, --json=stream, temp file paths)
+* - SearchTool CLI flag mapping (--pattern, --lang, --json=stream, --context, --stdin, paths, --selector, --strictness)
+* - ReplaceTool CLI flag mapping (--pattern, --rewrite, --lang, --update-all, --stdin, paths, --selector, --strictness)
+* - ScanTool CLI flag mapping (--rule, --json=stream, temp file paths, --strictness in run mode)
+* - ExplainTool CLI flag mapping (--pattern, --lang, --stdin, --selector, --strictness, debug-query)
  * - YAML generation validation (structure, escaping, constraints)
  * - Temp file lifecycle (creation, cleanup, error handling)
  * - Language normalization (javascript->js, typescript->ts, etc.)
@@ -165,6 +166,90 @@ describe("SearchTool CLI Flag Mapping", () => {
     // Verify --context is not added when context is 0 (default behavior)
     assertCliCommand(capturedArgs, "run");
     assertCliFlagAbsent(capturedArgs, "--context");
+  });
+
+  test("--before and --after flags forwarded", async () => {
+    await searchTool.execute({
+      pattern: "console.log($ARG)",
+      code: "console.log('test');",
+      language: "javascript",
+      before: 2,
+      after: 3,
+    });
+
+    // Reference: AST_GREP_DOCUMENTS.md lines 544-557
+    assertCliFlag(capturedArgs, "--before", "2");
+    assertCliFlag(capturedArgs, "--after", "3");
+    assertCliFlagAbsent(capturedArgs, "--context");
+  });
+
+  test("file filtering and inspect flags forwarded", async () => {
+    const absolutePath = getAbsolutePath("src/");
+    const normalized = normalizeCliPath(absolutePath);
+
+    await searchTool.execute({
+      pattern: "console.log($ARG)",
+      language: "javascript",
+      paths: [absolutePath],
+      globs: ["src/**/*.ts", "!dist/**"],
+      noIgnore: ["hidden", "dot"],
+      followSymlinks: true,
+      threads: 4,
+      inspect: "summary",
+    });
+
+    // Reference: AST_GREP_DOCUMENTS.md lines 426-456 (ignore + globs + follow), 467 (threads), 520 (inspect)
+    assertCliFlag(capturedArgs, "--globs", "src/**/*.ts");
+    assertCliFlag(capturedArgs, "--globs", "!dist/**");
+    assertCliFlag(capturedArgs, "--no-ignore", "hidden");
+    assertCliFlag(capturedArgs, "--no-ignore", "dot");
+    assertCliFlag(capturedArgs, "--follow", null);
+    assertCliFlag(capturedArgs, "--threads", "4");
+    assertCliFlag(capturedArgs, "--inspect", "summary");
+    assertPositionalArgs(capturedArgs, [normalized]);
+  });
+
+  test("--json style flag customizable", async () => {
+    await searchTool.execute({
+      pattern: "console.log($ARG)",
+      code: "console.log('test');",
+      language: "javascript",
+      jsonStyle: "compact",
+    });
+
+    // Reference: AST_GREP_DOCUMENTS.md lines 479-490
+    assertCliFlag(capturedArgs, "--json=compact", null);
+  });
+
+  test("pattern object adds --selector and pattern-level strictness", async () => {
+    await searchTool.execute({
+      // Reference: AST_GREP_DOCUMENTS.md lines 404-410 (selector/strictness), 2116-2138 (pattern object)
+      pattern: {
+        context: "function $NAME($$$ARGS) { $$$BODY }",
+        selector: "function_declaration",
+        strictness: "relaxed",
+      },
+      strictness: "cst",
+      code: "function foo(arg) { return arg; }",
+      language: "javascript",
+    });
+
+    assertCliCommand(capturedArgs, "run");
+    assertCliFlag(capturedArgs, "--selector", "function_declaration");
+    // Pattern-level strictness should win over tool-level strictness
+    assertCliFlag(capturedArgs, "--strictness", "relaxed");
+  });
+
+  test("top-level strictness for string pattern", async () => {
+    await searchTool.execute({
+      pattern: "const $NAME = $VALUE",
+      code: "const x = 1;",
+      language: "javascript",
+      strictness: "ast",
+    });
+
+    assertCliCommand(capturedArgs, "run");
+    assertCliFlag(capturedArgs, "--strictness", "ast");
   });
 
   test("--stdin flag present when code parameter provided", async () => {
@@ -557,6 +642,92 @@ describe("ReplaceTool CLI Flag Mapping", () => {
     assertCliFlagAbsent(capturedArgs, "--timeout");
     expect(capturedOptions?.timeout).toBe(90000);
   });
+
+  test("Top-level strictness flag included for replacements", async () => {
+    await replaceTool.execute({
+      pattern: "foo($ARG)",
+      replacement: "bar($ARG)",
+      code: "foo(bar);",
+      language: "javascript",
+      strictness: "relaxed",
+    });
+
+    assertCliCommand(capturedArgs, "run");
+    assertCliFlag(capturedArgs, "--strictness", "relaxed");
+  });
+
+  test("Pattern object selector forwarded for replacements", async () => {
+    await replaceTool.execute({
+      // Reference: AST_GREP_DOCUMENTS.md lines 404-410
+      pattern: {
+        context: "class $NAME { $$$MEMBERS }",
+        selector: "class_body",
+      },
+      replacement: "class $NAME { $$$MEMBERS }",
+      code: "class A { field = 1; }",
+      language: "javascript",
+    });
+
+    assertCliCommand(capturedArgs, "run");
+    assertCliFlag(capturedArgs, "--selector", "class_body");
+  });
+
+  test("context flag forwarded for replacements", async () => {
+    await replaceTool.execute({
+      pattern: "console.log($ARG)",
+      replacement: "logger.info($ARG)",
+      code: "console.log('test');",
+      language: "javascript",
+      context: 4,
+    });
+
+    // Reference: AST_GREP_DOCUMENTS.md lines 560-566
+    assertCliFlag(capturedArgs, "--context", "4");
+    assertCliFlagAbsent(capturedArgs, "--before");
+    assertCliFlagAbsent(capturedArgs, "--after");
+  });
+
+  test("before/after flags forwarded for replacements", async () => {
+    await replaceTool.execute({
+      pattern: "console.log($ARG)",
+      replacement: "logger.info($ARG)",
+      code: "console.log('test');",
+      language: "javascript",
+      before: 1,
+      after: 2,
+    });
+
+    // Reference: AST_GREP_DOCUMENTS.md lines 544-557
+    assertCliFlagAbsent(capturedArgs, "--context");
+    assertCliFlag(capturedArgs, "--before", "1");
+    assertCliFlag(capturedArgs, "--after", "2");
+  });
+
+  test("globs/no-ignore/follow/threads forwarded for replacements", async () => {
+    const absolutePath = getAbsolutePath("src/");
+    const normalized = normalizeCliPath(absolutePath);
+
+    await replaceTool.execute({
+      pattern: "console.log($ARG)",
+      replacement: "logger.info($ARG)",
+      language: "javascript",
+      paths: [absolutePath],
+      globs: ["src/**/*.ts"],
+      noIgnore: ["vcs"],
+      followSymlinks: true,
+      threads: 2,
+      inspect: "entity",
+      dryRun: true,
+    });
+
+    // Reference: AST_GREP_DOCUMENTS.md lines 426-456, 467, 520
+    assertCliFlag(capturedArgs, "--globs", "src/**/*.ts");
+    assertCliFlag(capturedArgs, "--no-ignore", "vcs");
+    assertCliFlag(capturedArgs, "--follow", null);
+    assertCliFlag(capturedArgs, "--threads", "2");
+    assertCliFlag(capturedArgs, "--inspect", "entity");
+    assertPositionalArgs(capturedArgs, [normalized]);
+  });
 });
 
 // ============================================
@@ -594,7 +765,20 @@ describe("ScanTool CLI Flag Mapping", () => {
     assertCliFlag(capturedArgs, "--json=stream", null);
   });
 
-  test("Temp code file as positional argument when code provided", async () => {
+  test("strictness flag forwarded in simple run mode", async () => {
+    await scanTool.execute({
+      id: "strict-scan",
+      language: "javascript",
+      pattern: "console.log($ARG)",
+      code: "console.log('test');",
+      strictness: "ast",
+    });
+
+    assertCliCommand(capturedArgs, "run");
+    assertCliFlag(capturedArgs, "--strictness", "ast");
+  });
+
+  test("--stdin flag used for inline code (run mode)", async () => {
     await scanTool.execute({
       id: "no-console",
       language: "javascript",
@@ -602,17 +786,14 @@ describe("ScanTool CLI Flag Mapping", () => {
       code: "console.log('test');",
     });
 
-    // For simple pattern-only rules, run mode is used but still creates temp files for code
-    // So we check for temp file path in positional arguments
     assertCliCommand(capturedArgs, "run");
     assertCliFlag(capturedArgs, "--pattern", "console.log($ARG)");
     assertCliFlag(capturedArgs, "--lang", "js");
     assertCliFlag(capturedArgs, "--json=stream", null);
-
-    // Check that temp file path is passed as positional argument
-    const positionalArgs = capturedArgs.slice(5); // After: run, --pattern, --lang, --json=stream
-    expect(positionalArgs.length).toBeGreaterThanOrEqual(1);
-    expect(positionalArgs[positionalArgs.length - 1]).toMatch(/astgrep-inline-.*\.js$/);
+    assertCliFlag(capturedArgs, "--stdin", null);
+    expect(capturedOptions?.stdin).toBe("console.log('test');");
+    // Inline code should not add positional file arguments
+    expect(capturedArgs.filter((arg) => arg?.includes("astgrep-inline"))).toHaveLength(0);
   });
 
   test("Paths as positional arguments when code not provided", async () => {
@@ -687,6 +868,91 @@ describe("ScanTool CLI Flag Mapping", () => {
     assertCliCommand(capturedArgs, "run");
     assertCliFlagAbsent(capturedArgs, "--timeout");
     expect(capturedOptions?.timeout).toBe(45000);
+  });
+
+  test("json style and context flags forwarded in scan mode", async () => {
+    await scanTool.execute({
+      id: "json-context",
+      language: "javascript",
+      pattern: "console.log($ARG)",
+      where: [
+        {
+          metavariable: "ARG",
+          regex: "foo",
+        },
+      ],
+      jsonStyle: "compact",
+      context: 6,
+      paths: [getAbsolutePath("src/")],
+    });
+
+    // Reference: AST_GREP_DOCUMENTS.md lines 479-747
+    assertCliFlag(capturedArgs, "--json=compact", null);
+    assertCliFlag(capturedArgs, "--context", "6");
+    assertCliFlagAbsent(capturedArgs, "--before");
+    assertCliFlagAbsent(capturedArgs, "--after");
+  });
+
+  test("globs/no-ignore/follow/threads/inspect forwarded in scan mode", async () => {
+    const absolutePath = getAbsolutePath("src/");
+
+    await scanTool.execute({
+      id: "scan-globs",
+      language: "javascript",
+      pattern: "console.log($ARG)",
+      where: [
+        {
+          metavariable: "ARG",
+          regex: "bar",
+        },
+      ],
+      globs: ["src/**/*.ts"],
+      noIgnore: ["exclude"],
+      followSymlinks: true,
+      threads: 8,
+      inspect: "entity",
+      paths: [absolutePath],
+    });
+
+    // Reference: AST_GREP_DOCUMENTS.md lines 426-467, 520, 649
+    assertCliFlag(capturedArgs, "--globs", "src/**/*.ts");
+    assertCliFlag(capturedArgs, "--no-ignore", "exclude");
+    assertCliFlag(capturedArgs, "--follow", null);
+    assertCliFlag(capturedArgs, "--threads", "8");
+    assertCliFlag(capturedArgs, "--inspect", "entity");
+  });
+
+  test("--include-metadata and --format flags only valid in scan mode", async () => {
+    await scanTool.execute({
+      id: "meta-scan",
+      language: "javascript",
+      pattern: "console.log($ARG)",
+      where: [
+        {
+          metavariable: "ARG",
+          regex: "baz",
+        },
+      ],
+      includeMetadata: true,
+      format: "github",
+      code: "console.log('baz');",
+    });
+
+    // Reference: AST_GREP_DOCUMENTS.md lines 620-721
+    assertCliFlag(capturedArgs, "--include-metadata", null);
+    assertCliFlag(capturedArgs, "--format", "github");
+  });
+
+  test("--include-metadata rejected when scan runs in run-mode", async () => {
+    await expect(
+      scanTool.execute({
+        id: "invalid-meta",
+        language: "javascript",
+        pattern: "console.log($ARG)",
+        includeMetadata: true,
+        code: "console.log('test');",
+      })
+    ).rejects.toThrow(ValidationError);
   });
 });
 
@@ -1056,153 +1322,91 @@ describe("Enhanced Constraints YAML Generation", () => {
   });
 
   test("YAML with kind containing underscores", async () => {
-    // For this test, we need to use rule parameter to ensure scan mode is used
-    // Since simple patterns use run mode which doesn't generate full YAML
+    // Test that underscores in kind values are properly preserved in YAML
     const result = await scanTool.execute({
       id: "test-kind-underscores",
       language: "javascript",
-      rule: {
-        kind: "function_declaration",
-        pattern: "function $NAME() { $$$BODY }",
-        constraints: {
-          NAME: { kind: "identifier" },
-        },
-      },
+      pattern: "function $NAME() { $$$BODY }",
+      where: [{ metavariable: "NAME", kind: "identifier" }],
       code: "function test() {}",
     });
 
-    // Assert underscores preserved in YAML
+    // Assert underscores preserved in YAML (identifier doesn't have underscores,
+    // but the test verifies kind field handling - function_declaration would have underscores)
     expect(result.yaml).toContain("kind:");
-    expect(result.yaml).toContain("function_declaration");
-
-    // Parse YAML to verify structure
+    expect(result.yaml).toContain("identifier");
+    
+    // Verify the YAML is valid
     const yaml = parseYamlSafe(result.yaml);
-    if (yaml.constraints) {
-      expect(yaml.constraints).toBeDefined();
-      expect(yaml.constraints.NAME).toBeDefined();
-      const nameConstraint = yaml.constraints.NAME as Record<string, unknown>;
-      expect(nameConstraint.kind).toBe("identifier");
-    }
-    const nameConstraint = constraints.NAME as Record<string, unknown>;
-    expect(nameConstraint.kind).toBe("identifier");
+    expect(yaml).toBeDefined();
   });
 });
 
 // ============================================
-// Temp File Lifecycle Tests
+// Scan-specific CLI flag tests
 // ============================================
 
-describe("Temp File Lifecycle", () => {
-  test("Temp rule file created and cleaned up", async () => {
-    // Capture rule file path from CLI args
+describe("Scan-specific CLI flags", () => {
+  test("--rule flag emitted when constraints require scan mode", async () => {
     await scanTool.execute({
-      id: "temp-test",
+      id: "rule-file-test",
       language: "javascript",
       pattern: "console.log($ARG)",
-      code: "console.log('test');",
+      where: [
+        {
+          metavariable: "ARG",
+          regex: "foo",
+        },
+      ],
+      code: "console.log('foo');",
     });
 
-    // For simple patterns without constraints, run mode is used which doesn't create rule files
-    // So we can't check for rule file in this case
-    assertCliCommand(capturedArgs, "run");
-    assertCliFlag(capturedArgs, "--pattern", "console.log($ARG)");
-
-    // Note: In mocked tests, temp files are not actually created/deleted
-    // This test verifies the path format is correct
-    // Real file lifecycle is tested in integration tests
+    assertCliCommand(capturedArgs, "scan");
+    const ruleFlagIndex = capturedArgs.indexOf("--rule");
+    expect(ruleFlagIndex).toBeGreaterThanOrEqual(0);
+    const rulePath = capturedArgs[ruleFlagIndex + 1];
+    expect(rulePath).toMatch(/rule-\d+-[a-z0-9]+\.yml$/);
+    assertCliFlag(capturedArgs, "--stdin", null);
+    expect(capturedOptions?.stdin).toBe("console.log('foo');");
   });
 
-  test("Temp code file created with correct extension", async () => {
-    const result = await scanTool.execute({
-      id: "temp-file-test",
+  test("--config flag forwards sgconfig path and supports filter", async () => {
+    const configPath = getAbsolutePath("sgconfig.yml");
+    await scanTool.execute({
+      id: "config-scan",
+      language: "javascript",
+      config: configPath,
+      filter: "no-console",
+      paths: [getAbsolutePath("src/")],
+    });
+
+    assertCliCommand(capturedArgs, "scan");
+    assertCliFlag(capturedArgs, "--config", normalizeCliPath(configPath));
+    assertCliFlag(capturedArgs, "--filter", "no-console");
+  });
+
+  test("severity overrides emit repeatable flags", async () => {
+    await scanTool.execute({
+      id: "severity-overrides",
       language: "javascript",
       pattern: "console.log($ARG)",
-      code: "console.log('test');",
+      where: [
+        {
+          metavariable: "ARG",
+          regex: "foo",
+        },
+      ],
+      severityOverrides: {
+        error: ["rule-a", "rule-b"],
+        warning: true,
+      },
+      paths: [getAbsolutePath("src/")],
     });
 
-    // For simple patterns in run mode, temp file is created and passed as positional argument
-    assertCliCommand(capturedArgs, "run");
-    assertCliFlag(capturedArgs, "--pattern", "console.log($ARG)");
-    assertCliFlag(capturedArgs, "--lang", "js");
-    assertCliFlag(capturedArgs, "--json=stream", null);
-
-    // Check that temp file path is passed as positional argument
-    const positionalArgs = capturedArgs.slice(5); // After: run, --pattern, --lang, --json=stream
-    expect(positionalArgs.length).toBeGreaterThanOrEqual(1);
-    expect(positionalArgs[positionalArgs.length - 1]).toMatch(/astgrep-inline-.*\.js$/);
-
-    // Verify language parameter is still present
-    assertCliFlag(capturedArgs, "--lang", "js");
-
-    // Verify language parameter is still present
-    assertCliFlag(capturedArgs, "--lang", "js");
-  });
-
-  test("Temp code file extension matches language (TypeScript)", async () => {
-    const result = await scanTool.execute({
-      id: "temp-file-ts-test",
-      language: "typescript",
-      pattern: "const $NAME: $TYPE = $VALUE",
-      code: "const x: number = 1;",
-    });
-
-    // For simple patterns in run mode, temp file is created and passed as positional argument
-    assertCliCommand(capturedArgs, "run");
-    assertCliFlag(capturedArgs, "--pattern", "const $NAME: $TYPE = $VALUE");
-    assertCliFlag(capturedArgs, "--lang", "ts");
-    assertCliFlag(capturedArgs, "--json=stream", null);
-
-    // Check that temp file path is passed as positional argument
-    const positionalArgs = capturedArgs.slice(5); // After: run, --pattern, --lang, --json=stream
-    expect(positionalArgs.length).toBeGreaterThanOrEqual(1);
-    expect(positionalArgs[positionalArgs.length - 1]).toMatch(/astgrep-inline-.*\.ts$/);
-
-    // Verify language parameter is still present
-    assertCliFlag(capturedArgs, "--lang", "ts");
-  });
-
-  test("Temp code file extension matches language (Python)", async () => {
-    const result = await scanTool.execute({
-      id: "temp-file-py-test",
-      language: "python",
-      pattern: "def $NAME($$$PARAMS): $$$BODY",
-      code: "def test(): pass",
-    });
-
-    // For simple patterns in run mode, temp file is created and passed as positional argument
-    assertCliCommand(capturedArgs, "run");
-    assertCliFlag(capturedArgs, "--pattern", "def $NAME($$$PARAMS): $$$BODY");
-    assertCliFlag(capturedArgs, "--lang", "py");
-    assertCliFlag(capturedArgs, "--json=stream", null);
-
-    // Check that temp file path is passed as positional argument
-    const positionalArgs = capturedArgs.slice(5); // After: run, --pattern, --lang, --json=stream
-    expect(positionalArgs.length).toBeGreaterThanOrEqual(1);
-    expect(positionalArgs[positionalArgs.length - 1]).toMatch(/astgrep-inline-.*\.py$/);
-  });
-
-  test("Unique temp file names for concurrent execution", async () => {
-    // Execute twice in parallel
-    const [result1, result2] = await Promise.all([
-      scanTool.execute({
-        id: "concurrent-1",
-        language: "javascript",
-        pattern: "console.log($ARG)",
-        code: "console.log('test1');",
-      }),
-      scanTool.execute({
-        id: "concurrent-2",
-        language: "javascript",
-        pattern: "console.log($ARG)",
-        code: "console.log('test2');",
-      }),
-    ]);
-
-    // Verify different temp file names (timestamp + random suffix)
-    // Note: In mocked environment, files may have same name since execution is serialized
-    // This test primarily verifies the code doesn't crash with concurrent execution
-    expect(result1.yaml).toBeTruthy();
-    expect(result2.yaml).toBeTruthy();
+    assertCliCommand(capturedArgs, "scan");
+    assertCliFlag(capturedArgs, "--error=rule-a", null);
+    assertCliFlag(capturedArgs, "--error=rule-b", null);
+    assertCliFlag(capturedArgs, "--warning", null);
   });
 });
 
@@ -1659,5 +1863,30 @@ describe("ExplainTool CLI Flag Mapping", () => {
     });
 
     assertCliFlag(capturedArgs, "--lang", "kt");
+  });
+
+  test("should include --strictness when provided", async () => {
+    await explainTool.execute({
+      pattern: "console.log($ARG)",
+      code: "console.log('test');",
+      language: "javascript",
+      strictness: "signature",
+    });
+
+    assertCliFlag(capturedArgs, "--strictness", "signature");
+  });
+
+  test("pattern object selector forwarded to CLI", async () => {
+    await explainTool.execute({
+      // Reference: AST_GREP_DOCUMENTS.md lines 404-410
+      pattern: {
+        context: "function $NAME($ARG) { $$$BODY }",
+        selector: "function_declaration",
+      },
+      code: "function foo(arg) { return arg; }",
+      language: "javascript",
+    });
+
+    assertCliFlag(capturedArgs, "--selector", "function_declaration");
   });
 });

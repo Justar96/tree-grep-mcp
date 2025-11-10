@@ -10,23 +10,47 @@ export interface WorkspaceConfig {
   maxDepth: number;
 }
 
+export interface WorkspaceManagerOptions {
+  explicitRoot?: string;
+  maxDepth?: number;
+}
+
 /**
  * Detects and manages workspace boundaries used by MCP tools.
  */
 export class WorkspaceManager {
   private config: WorkspaceConfig;
+  private static readonly DEFAULT_MAX_DEPTH = 10;
+  private static readonly MIN_MAX_DEPTH = 1;
+  private static readonly MAX_MAX_DEPTH = 20;
 
   /**
-   * Build workspace configuration from an optional explicit root.
+   * Build workspace configuration from optional parameters.
+   * @param options - Configuration options including explicit root and maxDepth
    */
-  constructor(explicitRoot?: string) {
-    this.config = this.detectWorkspace(explicitRoot);
+  constructor(options?: WorkspaceManagerOptions | string) {
+    // Support legacy string parameter for backward compatibility
+    if (typeof options === "string") {
+      this.config = this.detectWorkspace(options, WorkspaceManager.DEFAULT_MAX_DEPTH);
+    } else {
+      const explicitRoot = options?.explicitRoot;
+      const maxDepth = options?.maxDepth ?? WorkspaceManager.DEFAULT_MAX_DEPTH;
+
+      // Validate maxDepth
+      if (maxDepth < WorkspaceManager.MIN_MAX_DEPTH || maxDepth > WorkspaceManager.MAX_MAX_DEPTH) {
+        throw new Error(
+          `maxDepth must be between ${WorkspaceManager.MIN_MAX_DEPTH} and ${WorkspaceManager.MAX_MAX_DEPTH}, got ${maxDepth}`
+        );
+      }
+
+      this.config = this.detectWorkspace(explicitRoot, maxDepth);
+    }
   }
 
   /**
    * Determine the effective workspace root and allowed path boundaries.
    */
-  private detectWorkspace(explicitRoot?: string): WorkspaceConfig {
+  private detectWorkspace(explicitRoot?: string, maxDepth: number = WorkspaceManager.DEFAULT_MAX_DEPTH): WorkspaceConfig {
     let workspaceRoot: string;
 
     if (explicitRoot) {
@@ -40,7 +64,7 @@ export class WorkspaceManager {
       root: workspaceRoot,
       allowedPaths: [],
       blockedPaths: this.getBlockedPaths(),
-      maxDepth: 6,
+      maxDepth,
     };
   }
 

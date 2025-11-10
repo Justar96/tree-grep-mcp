@@ -3,16 +3,34 @@ import { AstGrepBinaryManager } from "../core/binary-manager.js";
 import { WorkspaceManager } from "../core/workspace-manager.js";
 import { ValidationError, ExecutionError } from "../types/errors.js";
 import { PatternValidator, ParameterValidator, PathValidator } from "../utils/validation.js";
+import type { InspectGranularity, JsonStyle, NoIgnoreOption } from "../types/cli.js";
+
+interface PatternObject {
+  context?: string;
+  selector?: string;
+  strictness?: "cst" | "smart" | "ast" | "relaxed" | "signature";
+}
 
 interface SearchParams {
-  pattern: string;
+  pattern: string | PatternObject;
   language?: string;
   paths?: string[];
   code?: string;
   context?: number;
+  before?: number;
+  after?: number;
   maxMatches?: number;
   timeoutMs?: number;
   verbose?: boolean;
+  strictness?: "cst" | "smart" | "ast" | "relaxed" | "signature";
+  globs?: string[];
+  noIgnore?: NoIgnoreOption[];
+  followSymlinks?: boolean;
+  threads?: number;
+  inspect?: InspectGranularity;
+  jsonStyle?: JsonStyle;
+  selector?: string;
+  maxDepth?: number;
 }
 
 interface MatchEntry {
@@ -52,26 +70,60 @@ export class SearchTool {
     // Runtime parameter validation with type narrowing
     const params = paramsRaw as unknown as SearchParams;
 
-    // Validate pattern
-    if (!params.pattern || typeof params.pattern !== "string") {
-      throw new ValidationError("Pattern is required and must be a string");
+    // Validate pattern (string or object)
+    if (!params.pattern) {
+      throw new ValidationError("Pattern is required");
     }
 
-    const patternValidation = PatternValidator.validatePattern(
-      params.pattern,
-      typeof params.language === "string" ? params.language : undefined
-    );
-    if (!patternValidation.valid) {
-      throw new ValidationError(`Invalid pattern: ${patternValidation.errors.join("; ")}`, {
-        errors: patternValidation.errors,
-      });
-    }
+    // Determine if pattern is string or object, and extract components
+    let patternString: string;
+    let localPatternSelector: string | undefined;
+    let patternStrictness: string | undefined;
 
-    // Log warnings if any - log each warning individually for better test assertions
-    if (patternValidation.warnings && patternValidation.warnings.length > 0) {
-      for (const warning of patternValidation.warnings) {
-        console.error(`Warning: ${warning}`);
+    if (typeof params.pattern === "string") {
+      // String pattern
+      patternString = params.pattern;
+
+      const patternValidation = PatternValidator.validatePattern(
+        patternString,
+        typeof params.language === "string" ? params.language : undefined
+      );
+      if (!patternValidation.valid) {
+        throw new ValidationError(`Invalid pattern: ${patternValidation.errors.join("; ")}`, {
+          errors: patternValidation.errors,
+        });
       }
+
+      // Log warnings if any
+      if (patternValidation.warnings && patternValidation.warnings.length > 0) {
+        for (const warning of patternValidation.warnings) {
+          console.error(`Warning: ${warning}`);
+        }
+      }
+    } else if (PatternValidator.isPatternObject(params.pattern)) {
+      // Pattern object
+      const patternObj = params.pattern as PatternObject;
+      const objValidation = PatternValidator.validatePatternObject(patternObj);
+
+      if (!objValidation.valid) {
+        throw new ValidationError(`Invalid pattern object: ${objValidation.errors.join("; ")}`, {
+          errors: objValidation.errors,
+        });
+      }
+
+      // Log warnings if any
+      if (objValidation.warnings && objValidation.warnings.length > 0) {
+        for (const warning of objValidation.warnings) {
+          console.error(`Warning: ${warning}`);
+        }
+      }
+
+      // Extract components
+      patternString = patternObj.context || patternObj.selector || "";
+      localPatternSelector = patternObj.selector;
+      patternStrictness = patternObj.strictness;
+    } else {
+      throw new ValidationError("Pattern must be a string or pattern object");
     }
 
     // Validate optional parameters with actionable error messages
@@ -79,6 +131,31 @@ export class SearchTool {
     if (!contextValidation.valid) {
       throw new ValidationError(contextValidation.errors.join("; "), {
         errors: contextValidation.errors,
+      });
+    }
+
+    const beforeValidation = ParameterValidator.validateContextWindow("before", params.before);
+    if (!beforeValidation.valid) {
+      throw new ValidationError(beforeValidation.errors.join("; "), {
+        errors: beforeValidation.errors,
+      });
+    }
+
+    const afterValidation = ParameterValidator.validateContextWindow("after", params.after);
+    if (!afterValidation.valid) {
+      throw new ValidationError(afterValidation.errors.join("; "), {
+        errors: afterValidation.errors,
+      });
+    }
+
+    const contextComboValidation = ParameterValidator.validateContextCombination(
+      params.context,
+      params.before,
+      params.after
+    );
+    if (!contextComboValidation.valid) {
+      throw new ValidationError(contextComboValidation.errors.join("; "), {
+        errors: contextComboValidation.errors,
       });
     }
 
@@ -110,8 +187,79 @@ export class SearchTool {
       });
     }
 
+    const globsValidation = ParameterValidator.validateGlobs(params.globs);
+    if (!globsValidation.valid) {
+      throw new ValidationError(globsValidation.errors.join("; "), { errors: globsValidation.errors });
+    }
+
+    const noIgnoreValidation = ParameterValidator.validateNoIgnore(params.noIgnore);
+    if (!noIgnoreValidation.valid) {
+      throw new ValidationError(noIgnoreValidation.errors.join("; "), {
+        errors: noIgnoreValidation.errors,
+      });
+    }
+
+    const followValidation = ParameterValidator.validateBooleanOption(
+      params.followSymlinks,
+      "followSymlinks"
+    );
+    if (!followValidation.valid) {
+      throw new ValidationError(followValidation.errors.join("; "), {
+        errors: followValidation.errors,
+      });
+    }
+
+    const threadsValidation = ParameterValidator.validateThreads(params.threads);
+    if (!threadsValidation.valid) {
+      throw new ValidationError(threadsValidation.errors.join("; "), {
+        errors: threadsValidation.errors,
+      });
+    }
+
+    const inspectValidation = ParameterValidator.validateInspect(params.inspect);
+    if (!inspectValidation.valid) {
+      throw new ValidationError(inspectValidation.errors.join("; "), {
+        errors: inspectValidation.errors,
+      });
+    }
+
+    const jsonStyleValidation = ParameterValidator.validateJsonStyle(params.jsonStyle);
+    if (!jsonStyleValidation.valid) {
+      throw new ValidationError(jsonStyleValidation.errors.join("; "), {
+        errors: jsonStyleValidation.errors,
+      });
+    }
+
+    // Validate maxDepth if provided
+    if (params.maxDepth !== undefined) {
+      if (typeof params.maxDepth !== "number" || !Number.isFinite(params.maxDepth)) {
+        throw new ValidationError("maxDepth must be a finite number");
+      }
+      if (params.maxDepth < 1 || params.maxDepth > 20) {
+        throw new ValidationError("maxDepth must be between 1 and 20");
+      }
+    }
+
+    // Validate strictness if provided
+    if (params.strictness !== undefined) {
+      const validStrictness = ["cst", "smart", "ast", "relaxed", "signature"];
+      if (typeof params.strictness !== "string" || !validStrictness.includes(params.strictness)) {
+        throw new ValidationError(
+          `Invalid strictness. Must be one of: ${validStrictness.join(", ")}`
+        );
+      }
+    }
+
     // Set default verbose value to true
     const isVerbose = params.verbose !== false;
+
+    // Create workspace manager with custom maxDepth if provided
+    const workspaceManager = params.maxDepth !== undefined
+      ? new WorkspaceManager({
+          explicitRoot: this.workspaceManager.getWorkspaceRoot(),
+          maxDepth: params.maxDepth
+        })
+      : this.workspaceManager;
 
     // Normalize language aliases when provided
     const normalizeLang = (lang: string) => {
@@ -140,19 +288,65 @@ export class SearchTool {
     };
 
     // Build ast-grep command directly
-    const args = ["run", "--pattern", params.pattern.trim()];
+    const args = ["run", "--pattern", patternString.trim()];
 
     // Add language if provided
     if (params.language) {
       args.push("--lang", normalizeLang(params.language));
     }
 
-    // Always use JSON stream for parsing
-    args.push("--json=stream");
+    // Add selector if provided (pattern object selector takes precedence over top-level selector)
+    const effectiveSelector = localPatternSelector ?? params.selector;
+    if (effectiveSelector) {
+      args.push("--selector", effectiveSelector);
+    }
+
+    // Add strictness (from pattern object or top-level param)
+    // Pattern object strictness takes precedence over top-level param
+    const effectiveStrictness = patternStrictness || params.strictness;
+    if (effectiveStrictness) {
+      args.push("--strictness", effectiveStrictness);
+    }
+
+    // Always request JSON output (style defaults to stream)
+    const jsonStyle = params.jsonStyle || "stream";
+    args.push(`--json=${jsonStyle}`);
 
     // Add context if requested
     if (params.context && params.context > 0) {
       args.push("--context", params.context.toString());
+    }
+
+    if (typeof params.before === "number" && params.before > 0) {
+      args.push("--before", params.before.toString());
+    }
+
+    if (typeof params.after === "number" && params.after > 0) {
+      args.push("--after", params.after.toString());
+    }
+
+    if (params.globs && params.globs.length > 0) {
+      for (const glob of params.globs) {
+        args.push("--globs", glob);
+      }
+    }
+
+    if (params.noIgnore && params.noIgnore.length > 0) {
+      for (const ignoreType of params.noIgnore) {
+        args.push("--no-ignore", ignoreType);
+      }
+    }
+
+    if (params.followSymlinks) {
+      args.push("--follow");
+    }
+
+    if (typeof params.threads === "number") {
+      args.push("--threads", params.threads.toString());
+    }
+
+    if (params.inspect) {
+      args.push("--inspect", params.inspect);
     }
 
     // Handle inline code vs file paths
@@ -161,7 +355,7 @@ export class SearchTool {
       timeout: number;
       stdin?: string;
     } = {
-      cwd: this.workspaceManager.getWorkspaceRoot(),
+      cwd: workspaceManager.getWorkspaceRoot(),
       timeout: params.timeoutMs || 30000,
     };
 
@@ -180,7 +374,7 @@ export class SearchTool {
 
       // Warn when scanning entire workspace with default path
       if (!pathsProvided) {
-        const workspaceRoot = this.workspaceManager.getWorkspaceRoot();
+        const workspaceRoot = workspaceManager.getWorkspaceRoot();
         const home = process.env.HOME || process.env.USERPROFILE || "";
 
         // Prevent scanning from home directory or common user directories
@@ -233,7 +427,7 @@ export class SearchTool {
       );
 
       // Validate paths for security (but don't use the absolute resolved paths)
-      const { valid, errors } = this.workspaceManager.validatePaths(normalizedPaths);
+      const { valid, errors } = workspaceManager.validatePaths(normalizedPaths);
       if (!valid) {
         // Replace normalized paths in error messages with original paths
         const originalErrors = errors.map((err) => {
@@ -387,185 +581,192 @@ export class SearchTool {
   static getSchema() {
     return {
       name: "ast_search",
-      description: `Structural code search using AST pattern matching. Searches code by syntax tree structure, not text matching. Returns file locations, line numbers, and matched code with context.
+      description: `Search code by AST structure (not text). Returns file locations, line numbers, and matched code.
 
-QUICK START:
-Search JavaScript files for console.log calls:
-{ "pattern": "console.log($ARG)", "paths": ["/workspace/src/"], "language": "javascript" }
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚡ REQUIRED PARAMETERS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Search inline code (language REQUIRED):
-{ "pattern": "console.log($ARG)", "code": "console.log('test');", "language": "javascript" }
+• pattern (string) - AST pattern with metavariables ($VAR, $$$ARGS, $_)
+• language (string) - REQUIRED when using 'code' parameter (js/ts/py/rust/go/java/cpp)
+• paths (array) - Absolute paths to search (e.g., ["/workspace/src/"])
+  OR
+• code (string) - Inline code to search (requires language parameter)
 
-WHEN TO USE:
-• Find all occurrences of a code pattern across files
-• Explore codebase structure (e.g., all function definitions, class declarations)
-• Test patterns quickly before building formal rules
-• Search specific code snippets for testing
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🚀 QUICK START (Copy & Modify)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-WHEN NOT TO USE:
-• Need metavariable constraints (e.g., $VAR must match "foo") → Use ast_run_rule with where constraints
-• Want to provide fix suggestions → Use ast_run_rule with fix parameter
-• Need severity levels or categorization → Use ast_run_rule
-• Need structural rules (kind/has/inside) → Use ast_run_rule with rule parameter
-• Text-based search (grep strings) → Use grep/ripgrep tools instead
-• Simple string matching without code structure → Use grep/ripgrep (faster and more appropriate)
-• Control flow analysis requiring stopBy behavior → Use ast_run_rule with relational rules
-• Regex-only matching → ast-grep requires AST patterns, use grep with regex instead
+1. Search files for function calls:
+   { "pattern": "console.log($ARG)", "paths": ["/workspace/src/"], "language": "javascript" }
 
-PATTERN SYNTAX:
-• $VAR - Single AST node (expression, identifier, statement)
-  - Examples: $ARG, $NAME, $VALUE, $OBJ, $PROP
-  - Naming: UPPER_CASE or UPPER_SNAKE_CASE recommended
-• $$$NAME - Multiple nodes, MUST be named (bare $$$ rejected)
-  - Examples: $$$ARGS, $$$PARAMS, $$$BODY, $$$ITEMS
-  - Matches: zero or more AST nodes in sequence
-  - Always requires a name (bare $$$ will be rejected)
-• $_ - Anonymous match (use when you don't need to reference it)
-  - Example: foo($_, $_, $_) matches three arguments without capturing
+2. Test pattern on inline code (language REQUIRED):
+   { "pattern": "console.log($ARG)", "code": "console.log('test');", "language": "javascript" }
 
-Metavariable rules:
-1. Must be complete AST nodes: Use "$OBJ.$PROP", not "$VAR.prop"
-2. Multi-node must be named: "$$$ARGS" not "$$$" (validation error if unnamed)
-3. Language-specific: JavaScript patterns won't work in Python
-4. Match structure, not text: "foo" won't match "foobar"
-5. Case-sensitive: $VAR and $var are different metavariables
+3. Search with file filtering:
+   { "pattern": "console.log($ARG)", "paths": ["/workspace/src/"], "globs": ["**/*.ts", "!**/*.test.ts"], "language": "typescript" }
 
-COMMON PATTERNS:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔧 TROUBLESHOOTING EMPTY RESULTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-1. Function calls:
-   Any arguments: "functionName($$$ARGS)"
-   Exactly one: "functionName($ARG)"
-   Exactly two: "functionName($A, $B)"
-   First + rest: "functionName($FIRST, $$$REST)"
+Got empty matches array? Check these IN ORDER:
 
-2. Function definitions:
-   Any function: "function $NAME($$$PARAMS) { $$$BODY }"
-   Arrow function: "($$$PARAMS) => $BODY"
-   Method: "$OBJ.$METHOD = function($$$PARAMS) { $$$BODY }"
-
-3. Class patterns:
-   Basic: "class $NAME { $$$MEMBERS }"
-   With extends: "class $NAME extends $BASE { $$$MEMBERS }"
-
-4. Control flow:
-   If statement: "if ($COND) { $$$BODY }"
-   Try-catch: "try { $$$TRY } catch ($ERR) { $$$CATCH }"
-
-5. Object operations:
-   Method call: "$OBJ.$METHOD($$$ARGS)"
-   Property access: "$OBJ.$PROP"
-   Destructuring: "const { $$$PROPS } = $OBJ"
-
-JSX/TSX (set language to 'jsx' or 'tsx'):
-   Element: "<$COMPONENT $$$ATTRS>" or "<$TAG>$$$CHILDREN</$TAG>"
-   Attribute: "<div $ATTR={$VALUE}>"
-   Event handler: "<Button onClick={$HANDLER}>"
-   WARNING: Broad patterns like "<$TAG>" match thousands of elements - be specific
-
-PATTERN LIBRARY:
-For more pattern examples, see: https://github.com/justar96/tree-grep-mcp/blob/main/PATTERN_LIBRARY.md
-
-ERROR RECOVERY:
-
-If search fails, check these common issues:
-
-1. "Language required for inline code"
+1. ❌ "Language required for inline code"
    → Add language parameter when using code parameter
    → Example: { pattern: "$P", code: "test", language: "javascript" }
 
-2. "Invalid paths"
-   → Use absolute paths like '/workspace/src/' or 'C:/workspace/src/'
-   → Relative paths are not supported (will be rejected with validation error)
-   → Paths validated against workspace root for security
-   → Omit paths to search entire workspace (defaults to current directory)
+2. ❌ "Invalid paths" or "Path must be absolute"
+   → Use absolute paths: "/workspace/src/" not "src/"
+   → Or omit paths entirely to search entire workspace
 
-3. "Invalid pattern: Use named multi-node metavariables like $$BODY instead of bare $$"
-   → Replace "$$$" with "$$$NAME"
-   → All multi-node metavariables must have names
+3. ✓ No error but matches: [] (empty array)
+   → Pattern is valid but nothing matched
+   → Try pattern on inline code first to verify syntax
+   → Check pattern matches language AST (JS patterns won't match Python)
+   → Use inspect: "summary" to see what files were scanned
 
-4. Timeout errors
-   → Increase timeoutMs (default: 30000ms)
+4. ⏱️ Timeout errors
+   → Increase timeoutMs (default: 30000ms, max: 300000ms)
    → Narrow paths to specific directories
-   → Specify language for faster parsing
-   → Recommended by repo size:
-     Small (<1K files): 30000ms (default)
-     Medium (1K-10K files): 60000-120000ms
-     Large (>10K files): 120000-300000ms (max: 300000ms)
+   → Use globs to filter files
 
-5. Empty results (no error, but matches array is empty)
-   → Pattern is valid but nothing matched (not an error)
-   → Try broader pattern or check pattern syntax matches language AST
-   → Verify paths contain files of specified language
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📝 PATTERN SYNTAX (Metavariables)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-6. summary.truncated: true
-   → Increase maxMatches parameter (default: 100, max: 10000)
-   → Or narrow search scope to reduce matches
-   → summary.totalMatches shows complete count even when truncated
+$VAR - Single AST node (expression, identifier, statement)
+  Examples: $ARG, $NAME, $VALUE, $OBJ, $PROP
+  Usage: "console.log($ARG)" matches console.log(anything)
 
-BEST PRACTICES:
-• Use for structural code patterns, not plain text searches
-• Start with simple patterns and add complexity incrementally
-• Test patterns on inline code before scanning large codebases
-• Specify language for faster parsing and better results
-• Use specific paths to reduce search scope and improve performance
-• For relational rules (inside/has), use stopBy: end to search thoroughly
+$$$NAME - Multiple nodes (MUST be named, bare $$$ rejected)
+  Examples: $$$ARGS, $$$PARAMS, $$$BODY
+  Usage: "foo($$$ARGS)" matches foo(), foo(1), foo(1,2,3)
 
-LIMITATIONS:
-• Paths must be within workspace root (security constraint)
-• Path depth limited to 6 levels from workspace root (use parent directories for deep paths)
-• Pattern syntax is language-specific (JS patterns won't work in Python)
-• Metavariables must be complete AST nodes (not partial identifiers)
-• Multi-node metavariables must be named ($$$ARGS, not $$$)
-• Control flow patterns (if/with/try blocks) have limited support
-• Multi-line patterns with newlines may not match - prefer single-line or structural rules
-• Not suitable for simple text matching - use grep/ripgrep instead
-• Indentation-sensitive for multi-line patterns
-• High skippedLines in output indicates ast-grep format changes (report issue)
+$_ - Anonymous match (when you don't need to reference it)
+  Usage: "foo($_, $_, $_)" matches exactly 3 arguments
 
-OPERATION MODES:
+Common Patterns:
+• Function calls: "functionName($$$ARGS)"
+• Method calls: "$OBJ.$METHOD($$$ARGS)"
+• Function definitions: "function $NAME($$$PARAMS) { $$$BODY }"
+• Control flow: "if ($COND) { $$$BODY }"
 
-File/Directory Mode (default):
-• Specify paths or omit for current directory
-• Language optional but recommended for performance
-• Example: { pattern: "console.log($$$ARGS)", paths: ["/workspace/src/"], language: "javascript" }
+WHEN TO USE THIS TOOL:
+• Find all occurrences of a code pattern across files
+• Explore codebase structure (function definitions, class declarations)
+• Test patterns quickly before building formal rules
 
-Inline Code Mode:
-• Use code parameter for testing patterns on snippets
-• Language REQUIRED (throws ValidationError if omitted)
-• Example: { pattern: "console.log($ARG)", code: "console.log('test');", language: "javascript" }
+WHEN NOT TO USE:
+• Need metavariable constraints → Use ast_run_rule with where constraints
+• Want fix suggestions → Use ast_run_rule with fix parameter
+• Text-based search → Use grep/ripgrep (faster for plain text)
 
-OUTPUT STRUCTURE:
-• matches: Array of { file, line, column, text, context: { before: [], after: [] } }
-• summary: { totalMatches, truncated, skippedLines, executionTime }
-• skippedLines: Count of malformed output lines (should be 0)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚙️ ADVANCED OPTIONS (Optional)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-PERFORMANCE:
-• Specify language for faster parsing
-• Use specific paths vs entire workspace
-• Adjust maxMatches by repo size:
-  Small (<1K files): 100-500
-  Medium (1K-10K): 50-200
-  Large (>10K): 20-100
+File Filtering:
+• globs: ["**/*.ts", "!**/*.test.ts"] - Include/exclude patterns (.gitignore style)
+• noIgnore: ["hidden", "dot"] - Search hidden files (bypasses .gitignore)
+• followSymlinks: true - Follow symbolic links (default: false)
 
-REFERENCE - MCP to ast-grep CLI Mapping:
-pattern → --pattern <value>
-language → --lang <value>
-code → --stdin (with stdin input)
-paths → positional arguments
-context → --context <number>
-maxMatches → result slicing (not a CLI flag)
-timeoutMs → process timeout (not a CLI flag)
+Performance:
+• threads: 4 - Parallel threads (default: 0 = auto-detect)
+• timeoutMs: 60000 - Timeout in ms (default: 30000, max: 300000)
+• maxDepth: 15 - Max directory depth from workspace root (1-20, default: 10)
+
+Context:
+• context: 3 - Lines around match (0-100, default: 0)
+• before: 2, after: 5 - Asymmetric context (conflicts with context)
+
+Output:
+• maxMatches: 100 - Max results (default: 100, max: 10000)
+• jsonStyle: "stream" - Format: stream/pretty/compact (default: stream)
+• verbose: false - Simplified output (default: true)
+
+Debugging:
+• inspect: "summary" - Show scan stats (nothing/summary/entity)
+• strictness: "smart" - Match precision (cst/smart/ast/relaxed/signature)
+• selector: "function_declaration" - Extract specific AST node type
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔍 PATTERN SYNTAX REFERENCE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Metavariable Rules:
+1. Must be complete AST nodes: "$OBJ.$PROP" not "$VAR.prop"
+2. Multi-node must be named: "$$$ARGS" not "$$$"
+3. Language-specific: JS patterns won't work in Python
+4. Match structure, not text: "foo" won't match "foobar"
+5. Case-sensitive: $VAR and $var are different
+
+More Examples:
+• JSX elements: "<$COMPONENT $$$ATTRS>" (use language: 'jsx' or 'tsx')
+• Arrow functions: "($$$PARAMS) => $BODY"
+• Destructuring: "const { $$$PROPS } = $OBJ"
+• Async/await: "async function $NAME($$$PARAMS) { $$$BODY }"
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📚 CLI FLAG MAPPING (For Reference)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+MCP Parameter → ast-grep CLI Flag:
+• pattern → --pattern <value>
+• language → --lang <normalized> (javascript→js, typescript→ts, python→py)
+• code → --stdin (with stdin input)
+• paths → positional arguments (default: ".")
+• context → --context <number>
+• before/after → --before/--after <number>
+• globs → --globs <pattern> (repeatable)
+• noIgnore → --no-ignore <type> (repeatable)
+• followSymlinks → --follow
+• threads → --threads <number>
+• inspect → --inspect <level>
+• jsonStyle → --json=<style>
+• strictness → --strictness <value>
+• selector → --selector <kind>
 
 Example: { pattern: "console.log($ARG)", paths: ["/workspace/src/"], language: "js", context: 2 }
-CLI: ast-grep run --pattern "console.log($ARG)" --lang js --context 2 --json=stream /workspace/src/`,
+→ ast-grep run --pattern "console.log($ARG)" --lang js --context 2 --json=stream /workspace/src/
+
+Reference: AST_GREP_DOCUMENTS.md lines 355-571`,
 
       inputSchema: {
         type: "object",
         properties: {
           pattern: {
-            type: "string",
+            oneOf: [
+              {
+                type: "string",
+                description:
+                  "AST pattern with metavariables ($VAR, $$$NAME, $_). Must be valid syntax for target language.",
+              },
+              {
+                type: "object",
+                properties: {
+                  context: {
+                    type: "string",
+                    description:
+                      "Code context for pattern parsing. Example: 'class { $FIELD }' to match field definitions.",
+                  },
+                  selector: {
+                    type: "string",
+                    description:
+                      "AST kind to extract from context. Example: 'field_definition' to match only field nodes. See: https://ast-grep.github.io/reference/languages.html",
+                  },
+                  strictness: {
+                    type: "string",
+                    enum: ["cst", "smart", "ast", "relaxed", "signature"],
+                    description: "Pattern-specific strictness override. Takes precedence over top-level strictness parameter.",
+                  },
+                },
+                description:
+                  "Pattern object for advanced matching with context and selector. Use when you need to match specific AST node types within a context. Example: { context: 'class { $F }', selector: 'field_definition' }",
+              },
+            ],
             description:
-              "AST pattern with metavariables ($VAR, $$$NAME, $_). Must be valid syntax for target language.",
+              "AST pattern (string or object). String form for simple patterns, object form for advanced context-based matching with selector.",
           },
           code: {
             type: "string",
@@ -602,6 +803,74 @@ CLI: ast-grep run --pattern "console.log($ARG)" --lang js --context 2 --json=str
             type: "boolean",
             description:
               "Control output verbosity. Default: true. When false, returns simplified summary without detailed match information. Useful in CLI to prevent excessive output.",
+          },
+          strictness: {
+            type: "string",
+            enum: ["cst", "smart", "ast", "relaxed", "signature"],
+            description:
+              "Pattern matching strictness (default: 'smart'). Controls how precisely patterns must match AST nodes:\n" +
+              "- cst: Match exact CST nodes (most strict, includes all syntax)\n" +
+              "- smart: Match AST nodes except trivial tokens like parentheses (default, recommended)\n" +
+              "- ast: Match only named AST nodes (ignores unnamed nodes)\n" +
+              "- relaxed: Match AST nodes except comments (good for commented code)\n" +
+              "- signature: Match AST structure without text content (matches any identifier/literal)\n" +
+              "See: https://ast-grep.github.io/advanced/match-algorithm.html",
+          },
+          before: {
+            type: "number",
+            description:
+              "Lines before each match (0-100). Conflicts with context parameter. Use context for symmetric context or before/after for asymmetric.",
+          },
+          after: {
+            type: "number",
+            description:
+              "Lines after each match (0-100). Conflicts with context parameter. Use context for symmetric context or before/after for asymmetric.",
+          },
+          globs: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Include/exclude file patterns (.gitignore-style). Example: ['src/**/*.ts', '!dist/**', '!**/*.test.ts']. Use ! prefix to exclude.",
+          },
+          noIgnore: {
+            type: "array",
+            items: {
+              type: "string",
+              enum: ["hidden", "dot", "exclude", "global", "parent", "vcs"],
+            },
+            description:
+              "Bypass ignore files. Values: 'hidden', 'dot', 'exclude', 'global', 'parent', 'vcs'. Example: ['hidden', 'dot'] to search hidden files.",
+          },
+          followSymlinks: {
+            type: "boolean",
+            description: "Follow symbolic links during traversal. Default: false.",
+          },
+          threads: {
+            type: "number",
+            description:
+              "Parallel processing thread count (0-64). Default: 0 (auto-detect based on CPU cores).",
+          },
+          inspect: {
+            type: "string",
+            enum: ["nothing", "summary", "entity"],
+            description:
+              "Debug file/rule discovery. Values: 'nothing' (default), 'summary', 'entity'. Logs to stderr.",
+          },
+          jsonStyle: {
+            type: "string",
+            enum: ["stream", "pretty", "compact"],
+            description:
+              "JSON output format. Values: 'stream' (default, JSONL), 'pretty', 'compact'.",
+          },
+          selector: {
+            type: "string",
+            description:
+              "AST kind to match. Example: 'function_declaration'. See: https://ast-grep.github.io/reference/languages.html",
+          },
+          maxDepth: {
+            type: "number",
+            description:
+              "Maximum directory depth for path validation (1-20). Default: 10. Controls how deep paths can be from workspace root. Example: maxDepth=5 allows /workspace/a/b/c/d/e/ but rejects /workspace/a/b/c/d/e/f/.",
           },
         },
         required: ["pattern"],

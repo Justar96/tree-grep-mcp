@@ -74,8 +74,9 @@ describeOrSkip("Complex Language-Specific Patterns", () => {
 
     test("async/await patterns", async () => {
       const result = await searchTool!.execute({
-        pattern: "async def $NAME($ARGS):\n    $BODY",
-        code: "async def fetch_data(url):\n    return await request(url)",
+        pattern: "async def $NAME($$$ARGS): $$$BODY",
+        code: `async def fetch_data(url):
+    return await request(url)`,
         language: "python",
       });
 
@@ -104,7 +105,7 @@ describeOrSkip("Complex Language-Specific Patterns", () => {
 
     test("impl blocks", async () => {
       const result = await searchTool!.execute({
-        pattern: "impl $TRAIT for $TYPE {\n    $BODY\n}",
+        pattern: "impl $TRAIT for $TYPE { $$$BODY }",
         code: `impl Display for MyType {
     fn fmt(&self, f: &mut Formatter) -> Result {
         write!(f, "{}", self.value)
@@ -126,14 +127,14 @@ describeOrSkip("Complex Language-Specific Patterns", () => {
   });
 
   describe("Generic/Template Patterns", () => {
-    // LIMITATION: SearchTool doesn't support pattern objects yet
-    // Per ast-grep docs, this requires: pattern object with selector, context, strictness
-    // ScanTool DOES support pattern objects - see tests/structural-rules.test.ts
-    // Future enhancement: Add pattern object support to SearchTool
-    // Workaround: Use ScanTool with rule parameter containing pattern object
-    test.skip("[SearchTool limitation] TypeScript generics", async () => {
+    test("TypeScript generics via pattern object selector", async () => {
       const result = await searchTool!.execute({
-        pattern: "function $NAME<$T>($ARG: $T): $T",
+        // Reference: AST_GREP_DOCUMENTS.md lines 404-410 (selector/strictness), 2116-2138 (pattern object)
+        pattern: {
+          context: "function $NAME<$TYPE>($ARG: $TYPE): $TYPE { $$$BODY }",
+          selector: "function_declaration",
+          strictness: "ast",
+        },
         code: "function identity<T>(arg: T): T { return arg; }",
         language: "typescript",
       });

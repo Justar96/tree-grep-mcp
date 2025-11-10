@@ -361,7 +361,7 @@ async function async() { await fetch("/api"); }
           language: "javascript",
           code: "test",
         })
-      ).rejects.toThrow("Either pattern (string) or rule (object) is required");
+      ).rejects.toThrow("Provide either pattern/rule inputs or config/filter parameters");
     });
 
     test("validates pattern object properties", async () => {
@@ -378,6 +378,18 @@ async function async() { await fetch("/api"); }
           code: "test",
         })
       ).rejects.toThrow("Invalid strictness");
+    });
+
+    test("validates top-level strictness", async () => {
+      await expect(
+        scanTool!.execute({
+          id: "invalid-top-level-strictness",
+          language: "javascript",
+          pattern: "foo($BAR)",
+          strictness: "invalid" as any,
+          code: "foo(bar);",
+        })
+      ).rejects.toThrow("strictness must be one of");
     });
 
     test("validates kind is string", async () => {

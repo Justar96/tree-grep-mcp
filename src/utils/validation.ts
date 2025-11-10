@@ -1,4 +1,11 @@
 import * as path from "path";
+import type {
+  InspectGranularity,
+  JsonStyle,
+  NoIgnoreOption,
+  SeverityOverrideConfig,
+  SeverityOverrideValue,
+} from "../types/cli.js";
 
 /**
  * Validation result interface
@@ -386,6 +393,17 @@ export class PatternValidator {
       warnings.push(...langWarnings);
     }
 
+    // Check for multi-line patterns that may timeout
+    const newlineCount = (pattern.match(/\\n/g) || []).length;
+    if (newlineCount >= 3) {
+      warnings.push(
+        `Pattern contains ${newlineCount} explicit newlines (\\n). ` +
+          `Multi-line patterns with 3+ newlines may timeout or fail to match. ` +
+          `Consider using structural rules instead: { kind: "...", has: { ... } }. ` +
+          `See: https://ast-grep.github.io/guide/rule-config.html#relational-rule`
+      );
+    }
+
     // Check for common mistakes
     if (pattern.includes("$$$)") && !pattern.includes("($$$")) {
       warnings.push(
@@ -462,6 +480,91 @@ export class PatternValidator {
         `Pattern metavariables not used in replacement: ` +
           `${unusedMetavars.map((m) => `$${m}`).join(", ")}. ` +
           `This may be intentional if you're removing or ignoring parts of the match.`
+      );
+    }
+
+    return {
+      valid: errors.length === 0,
+      errors,
+      warnings: warnings.length > 0 ? warnings : undefined,
+    };
+  }
+
+  /**
+   * Type guard to check if a value is a pattern object
+   */
+  static isPatternObject(pattern: unknown): pattern is {
+    context?: string;
+    selector?: string;
+    strictness?: string;
+  } {
+    return (
+      typeof pattern === "object" &&
+      pattern !== null &&
+      !Array.isArray(pattern) &&
+      (typeof (pattern as any).context === "string" ||
+        typeof (pattern as any).selector === "string" ||
+        typeof (pattern as any).strictness === "string")
+    );
+  }
+
+  /**
+   * Validate a pattern object (selector, context, strictness form)
+   */
+  static validatePatternObject(patternObj: {
+    context?: string;
+    selector?: string;
+    strictness?: string;
+  }): ValidationResult {
+    const errors: string[] = [];
+    const warnings: string[] = [];
+
+    // Must have at least context or selector
+    if (!patternObj.context && !patternObj.selector) {
+      errors.push(
+        "Pattern object must have either 'context' or 'selector' field. " +
+          "Example: { context: 'class { $FIELD }', selector: 'field_definition' }"
+      );
+    }
+
+    // Validate context if present
+    if (patternObj.context) {
+      if (typeof patternObj.context !== "string") {
+        errors.push("Pattern object 'context' must be a string");
+      } else {
+        const contextValidation = this.validatePattern(patternObj.context);
+        if (!contextValidation.valid) {
+          errors.push(...contextValidation.errors.map((e) => `context: ${e}`));
+        }
+        if (contextValidation.warnings) {
+          warnings.push(...contextValidation.warnings.map((w) => `context: ${w}`));
+        }
+      }
+    }
+
+    // Validate selector if present
+    if (patternObj.selector && typeof patternObj.selector !== "string") {
+      errors.push("Pattern object 'selector' must be a string");
+    }
+
+    // Validate strictness if present
+    if (patternObj.strictness) {
+      const validStrictness = ["cst", "smart", "ast", "relaxed", "signature"];
+      if (
+        typeof patternObj.strictness !== "string" ||
+        !validStrictness.includes(patternObj.strictness)
+      ) {
+        errors.push(
+          `Invalid strictness in pattern object: ${patternObj.strictness}. ` +
+            `Must be one of: ${validStrictness.join(", ")}`
+        );
+      }
+    }
+
+    // Warn if both context and selector are provided (selector takes precedence)
+    if (patternObj.context && patternObj.selector) {
+      warnings.push(
+        "Pattern object has both 'context' and 'selector'. The 'selector' will be used to extract a sub-node from 'context'."
       );
     }
 
@@ -882,6 +985,270 @@ export class ParameterValidator {
       errors.push(
         `Invalid kind: "${kind}". Must be lowercase with underscores (e.g., 'function_declaration', 'string_literal', 'identifier'). See AST_GREP_DOCUMENTS.md for valid node types.`
       );
+    }
+
+    return { valid: errors.length === 0, errors };
+  }
+
+  /**
+   * Validate globs parameter (array of non-empty strings)
+   */
+  static validateGlobs(globs: unknown): ValidationResult {
+    const errors: string[] = [];
+
+    if (globs === undefined || globs === null) {
+      return { valid: true, errors: [] };
+    }
+
+    if (!Array.isArray(globs)) {
+      errors.push("globs must be an array of strings. Example: globs: ['src/**/*.ts', '!dist']");
+      return { valid: false, errors };
+    }
+
+    globs.forEach((glob, index) => {
+      if (typeof glob !== "string" || glob.trim().length === 0) {
+        errors.push(`globs[${index}] must be a non-empty string. Example: '**/*.ts'`);
+      }
+    });
+
+    return { valid: errors.length === 0, errors };
+  }
+
+  /**
+   * Validate noIgnore parameter (array of allowed values)
+   */
+  static validateNoIgnore(noIgnore: unknown): ValidationResult {
+    const errors: string[] = [];
+
+    if (noIgnore === undefined || noIgnore === null) {
+      return { valid: true, errors: [] };
+    }
+
+    if (!Array.isArray(noIgnore)) {
+      errors.push(
+        "noIgnore must be an array of values: 'hidden', 'dot', 'exclude', 'global', 'parent', or 'vcs'"
+      );
+      return { valid: false, errors };
+    }
+
+    const allowed: NoIgnoreOption[] = ["hidden", "dot", "exclude", "global", "parent", "vcs"];
+    noIgnore.forEach((value, index) => {
+      if (typeof value !== "string" || !allowed.includes(value as NoIgnoreOption)) {
+        errors.push(
+          `noIgnore[${index}] must be one of: ${allowed.join(
+            ", "
+          )}. Example: noIgnore: ['hidden', 'dot']`
+        );
+      }
+    });
+
+    return { valid: errors.length === 0, errors };
+  }
+
+  /**
+   * Validate boolean parameter with custom name
+   */
+  static validateBooleanOption(option: unknown, name: string): ValidationResult {
+    const errors: string[] = [];
+
+    if (option === undefined || option === null) {
+      return { valid: true, errors: [] };
+    }
+
+    if (typeof option !== "boolean") {
+      errors.push(`${name} must be a boolean (true or false). Example: ${name}: true`);
+    }
+
+    return { valid: errors.length === 0, errors };
+  }
+
+  /**
+   * Validate threads parameter (-j/--threads)
+   */
+  static validateThreads(threads: unknown): ValidationResult {
+    const errors: string[] = [];
+
+    if (threads === undefined || threads === null) {
+      return { valid: true, errors: [] };
+    }
+
+    if (typeof threads !== "number" || Number.isNaN(threads)) {
+      errors.push(`threads must be a number. Example: threads: 4`);
+      return { valid: false, errors };
+    }
+
+    if (!Number.isInteger(threads)) {
+      errors.push(`threads must be an integer. Received: ${threads}`);
+    }
+
+    if (threads < 0) {
+      errors.push(`threads must be >= 0. Received: ${threads}. Use 0 to let ast-grep auto-detect.`);
+    }
+
+    if (threads > 256) {
+      errors.push(`threads cannot exceed 256. Received: ${threads}.`);
+    }
+
+    return { valid: errors.length === 0, errors };
+  }
+
+  /**
+   * Validate inspect parameter (--inspect)
+   */
+  static validateInspect(inspect: unknown): ValidationResult {
+    const errors: string[] = [];
+
+    if (inspect === undefined || inspect === null) {
+      return { valid: true, errors: [] };
+    }
+
+    const allowed: InspectGranularity[] = ["nothing", "summary", "entity"];
+    if (typeof inspect !== "string" || !allowed.includes(inspect as InspectGranularity)) {
+      errors.push(
+        `inspect must be one of: ${allowed.join(", ")}. Example: inspect: "summary"`
+      );
+    }
+
+    return { valid: errors.length === 0, errors };
+  }
+
+  /**
+   * Validate jsonStyle parameter (--json=<STYLE>)
+   */
+  static validateJsonStyle(jsonStyle: unknown): ValidationResult {
+    const errors: string[] = [];
+
+    if (jsonStyle === undefined || jsonStyle === null) {
+      return { valid: true, errors: [] };
+    }
+
+    const allowed: JsonStyle[] = ["pretty", "stream", "compact"];
+    if (typeof jsonStyle !== "string" || !allowed.includes(jsonStyle as JsonStyle)) {
+      errors.push(
+        `jsonStyle must be one of: ${allowed.join(", ")}. Example: jsonStyle: "compact"`
+      );
+    }
+
+    return { valid: errors.length === 0, errors };
+  }
+
+  /**
+   * Validate individual context window flags (-A/--after, -B/--before)
+   */
+  static validateContextWindow(
+    name: "before" | "after",
+    value: unknown
+  ): ValidationResult {
+    const errors: string[] = [];
+
+    if (value === undefined || value === null) {
+      return { valid: true, errors: [] };
+    }
+
+    if (typeof value !== "number" || Number.isNaN(value)) {
+      errors.push(`${name} must be a number. Example: ${name}: 5`);
+      return { valid: false, errors };
+    }
+
+    if (!Number.isFinite(value)) {
+      errors.push(`${name} must be finite. Received: ${value}`);
+      return { valid: false, errors };
+    }
+
+    if (value < 0) {
+      errors.push(`${name} must be >= 0. Received: ${value}`);
+    }
+
+    if (value > 100) {
+      errors.push(`${name} cannot exceed 100. Received: ${value}`);
+    }
+
+    return { valid: errors.length === 0, errors };
+  }
+
+  /**
+   * Validate that context/before/after flags do not conflict
+   */
+  static validateContextCombination(
+    context: unknown,
+    before: unknown,
+    after: unknown
+  ): ValidationResult {
+    const errors: string[] = [];
+    const hasContext = context !== undefined && context !== null;
+    const hasBefore = before !== undefined && before !== null;
+    const hasAfter = after !== undefined && after !== null;
+
+    if (hasContext && (hasBefore || hasAfter)) {
+      errors.push("context cannot be combined with before/after. Choose one style of context flag.");
+    }
+
+    return { valid: errors.length === 0, errors };
+  }
+
+  /**
+   * Validate --format parameter for scan mode
+   */
+  static validateFormat(format: unknown): ValidationResult {
+    const errors: string[] = [];
+
+    if (format === undefined || format === null) {
+      return { valid: true, errors: [] };
+    }
+
+    if (typeof format !== "string") {
+      errors.push(`format must be a string. Example: format: "github"`);
+      return { valid: false, errors };
+    }
+
+    if (format !== "github") {
+      errors.push(`format only supports "github" (AST_GREP_DOCUMENTS.md line 715). Received: ${format}`);
+    }
+
+    return { valid: errors.length === 0, errors };
+  }
+
+  /**
+   * Validate severity overrides configuration (--error/--warning/...)
+   */
+  static validateSeverityOverrides(overrides: unknown): ValidationResult {
+    const errors: string[] = [];
+
+    if (overrides === undefined || overrides === null) {
+      return { valid: true, errors: [] };
+    }
+
+    if (typeof overrides !== "object" || Array.isArray(overrides)) {
+      return { valid: false, errors: ["severityOverrides must be an object mapping severity levels"] };
+    }
+
+    const cast = overrides as SeverityOverrideConfig;
+    const levels: Array<keyof SeverityOverrideConfig> = ["error", "warning", "info", "hint", "off"];
+
+    const validateValue = (value: SeverityOverrideValue, level: string): void => {
+      if (value === true) {
+        return; // apply to all rules
+      }
+      if (!Array.isArray(value) || value.length === 0) {
+        errors.push(
+          `severityOverrides.${level} must be an array of rule IDs or true to apply to all rules`
+        );
+        return;
+      }
+      value.forEach((ruleId, index) => {
+        if (typeof ruleId !== "string" || ruleId.trim().length === 0) {
+          errors.push(
+            `severityOverrides.${level}[${index}] must be a non-empty string rule ID`
+          );
+        }
+      });
+    };
+
+    for (const level of levels) {
+      const value = cast[level];
+      if (value !== undefined) {
+        validateValue(value, level);
+      }
     }
 
     return { valid: errors.length === 0, errors };

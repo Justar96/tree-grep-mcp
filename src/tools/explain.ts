@@ -3,13 +3,20 @@ import { WorkspaceManager } from "../core/workspace-manager.js";
 import { ValidationError, ExecutionError } from "../types/errors.js";
 import { PatternValidator, ParameterValidator } from "../utils/validation.js";
 
+interface PatternObject {
+  context?: string;
+  selector?: string;
+  strictness?: "cst" | "smart" | "ast" | "relaxed" | "signature";
+}
+
 interface ExplainParams {
-  pattern: string;
+  pattern: string | PatternObject;
   code: string;
   language: string;
   showAst?: boolean;
   timeoutMs?: number;
   verbose?: boolean;
+  strictness?: "cst" | "smart" | "ast" | "relaxed" | "signature";
 }
 
 interface MetavariableCapture {
@@ -39,11 +46,7 @@ export class ExplainTool {
     // Runtime parameter validation with type narrowing
     const params = paramsRaw as unknown as ExplainParams;
 
-    // Validate required parameters
-    if (!params.pattern || typeof params.pattern !== "string") {
-      throw new ValidationError("Pattern is required and must be a string");
-    }
-
+    // Validate code parameter
     if (!params.code || typeof params.code !== "string") {
       throw new ValidationError("Code is required and must be a string");
     }
@@ -52,19 +55,57 @@ export class ExplainTool {
       throw new ValidationError("Language is required and must be a string");
     }
 
-    // Validate pattern syntax
-    const patternValidation = PatternValidator.validatePattern(params.pattern, params.language);
-    if (!patternValidation.valid) {
-      throw new ValidationError(`Invalid pattern: ${patternValidation.errors.join("; ")}`, {
-        errors: patternValidation.errors,
-      });
+    // Validate pattern (string or object)
+    if (!params.pattern) {
+      throw new ValidationError("Pattern is required");
     }
 
-    // Log warnings if any
-    if (patternValidation.warnings && patternValidation.warnings.length > 0) {
-      for (const warning of patternValidation.warnings) {
-        console.error(`Warning: ${warning}`);
+    // Determine if pattern is string or object, and extract components
+    let patternString: string;
+    let selector: string | undefined;
+    let patternStrictness: string | undefined;
+
+    if (typeof params.pattern === "string") {
+      // String pattern
+      patternString = params.pattern;
+
+      const patternValidation = PatternValidator.validatePattern(patternString, params.language);
+      if (!patternValidation.valid) {
+        throw new ValidationError(`Invalid pattern: ${patternValidation.errors.join("; ")}`, {
+          errors: patternValidation.errors,
+        });
       }
+
+      // Log warnings if any
+      if (patternValidation.warnings && patternValidation.warnings.length > 0) {
+        for (const warning of patternValidation.warnings) {
+          console.error(`Warning: ${warning}`);
+        }
+      }
+    } else if (PatternValidator.isPatternObject(params.pattern)) {
+      // Pattern object
+      const patternObj = params.pattern as PatternObject;
+      const objValidation = PatternValidator.validatePatternObject(patternObj);
+
+      if (!objValidation.valid) {
+        throw new ValidationError(`Invalid pattern object: ${objValidation.errors.join("; ")}`, {
+          errors: objValidation.errors,
+        });
+      }
+
+      // Log warnings if any
+      if (objValidation.warnings && objValidation.warnings.length > 0) {
+        for (const warning of objValidation.warnings) {
+          console.error(`Warning: ${warning}`);
+        }
+      }
+
+      // Extract components
+      patternString = patternObj.context || patternObj.selector || "";
+      selector = patternObj.selector;
+      patternStrictness = patternObj.strictness;
+    } else {
+      throw new ValidationError("Pattern must be a string or pattern object");
     }
 
     // Validate code size
@@ -126,12 +167,24 @@ export class ExplainTool {
     const args = [
       "run",
       "--pattern",
-      params.pattern.trim(),
+      patternString.trim(),
       "--lang",
       normalizedLang,
-      "--json=stream",
-      "--stdin",
     ];
+
+    // Add selector if from pattern object
+    if (selector) {
+      args.push("--selector", selector);
+    }
+
+    // Add strictness (from pattern object or top-level param)
+    // Pattern object strictness takes precedence over top-level param
+    const effectiveStrictness = patternStrictness || params.strictness;
+    if (effectiveStrictness) {
+      args.push("--strictness", effectiveStrictness);
+    }
+
+    args.push("--json=stream", "--stdin");
 
     const executeOptions = {
       cwd: this.workspaceManager.getWorkspaceRoot(),
@@ -148,12 +201,23 @@ export class ExplainTool {
         const astArgs = [
           "run",
           "--pattern",
-          params.pattern.trim(),
+          patternString.trim(),
           "--lang",
           normalizedLang,
-          "--debug-query=ast",
-          "--stdin",
         ];
+
+        // Add selector if from pattern object
+        if (selector) {
+          astArgs.push("--selector", selector);
+        }
+
+        // Add strictness to AST debug query too (from pattern object or top-level param)
+        if (effectiveStrictness) {
+          astArgs.push("--strictness", effectiveStrictness);
+        }
+
+        astArgs.push("--debug-query=ast", "--stdin");
+
         const astResult = await this.binaryManager.executeAstGrep(astArgs, executeOptions);
         astDebugOutput = astResult.stdout || astResult.stderr;
       }
@@ -377,9 +441,6 @@ COMMON PATTERNS:
    Basic: "class $NAME { $$$MEMBERS }"
    With extends: "class $NAME extends $BASE { $$$MEMBERS }"
 
-PATTERN LIBRARY:
-For more pattern examples, see: https://github.com/justar96/tree-grep-mcp/blob/main/PATTERN_LIBRARY.md
-
 OUTPUT STRUCTURE:
 {
   "matched": boolean,          // true if pattern matched the code
@@ -424,6 +485,16 @@ If pattern fails to match, check these common issues:
    → Pattern has no metavariables (e.g., "console.log()")
    → This is expected for literal patterns
 
+ADVANCED OPTIONS:
+
+Debugging:
+• showAst: Include AST debug output (executes --debug-query=ast)
+• verbose: Control output verbosity (default: true, false returns simplified summary)
+• strictness: Pattern matching strictness (cst, smart, ast, relaxed, signature)
+
+Performance:
+• timeoutMs: Process timeout in milliseconds (1000-300000, default: 10000)
+
 LIMITATIONS:
 • Only works with inline code (not file paths)
 • Default timeout 10 seconds (configurable via timeoutMs)
@@ -437,27 +508,62 @@ PERFORMANCE:
 • Perfect for iterative pattern development
 • Adjust timeout for complex patterns
 
-REFERENCE - MCP to ast-grep CLI Mapping:
-pattern → --pattern <value>
-language → --lang <value>
-code → --stdin (with stdin input)
-timeoutMs → process timeout (not a CLI flag)
-showAst → --debug-query=ast (separate call when true)
+CLI FLAG REFERENCE:
 
-Example: { pattern: "console.log($ARG)", code: "console.log('test');", language: "js" }
-CLI: ast-grep run --pattern "console.log($ARG)" --lang js --json=stream --stdin
+MCP Parameter → ast-grep CLI Flag:
+• pattern → --pattern <value>
+• language → --lang <value>
+• code → --stdin (with stdin input)
+• strictness → --strictness cst|smart|ast|relaxed|signature
+• showAst → --debug-query=ast (separate call when true)
+• verbose → Controls output verbosity (not a CLI flag, affects result formatting)
+• timeoutMs → Process timeout (not a CLI flag)
 
-Example with AST: { pattern: "console.log($ARG)", code: "console.log('test');", language: "js", showAst: true }
-CLI: ast-grep run --pattern "console.log($ARG)" --lang js --json=stream --stdin
-     ast-grep run --pattern "console.log($ARG)" --lang js --debug-query=ast --stdin`,
+Language Normalization:
+javascript→js, typescript→ts, python→py, golang→go, c++→cpp, csharp→cs
+
+Example Commands:
+1. Basic explain: ast-grep run --pattern "console.log($ARG)" --lang js --json=stream --stdin
+2. With strictness: ast-grep run --pattern "console.log($ARG)" --lang js --strictness relaxed --json=stream --stdin
+3. With AST debug: ast-grep run --pattern "console.log($ARG)" --lang js --debug-query=ast --stdin
+
+Reference: AST_GREP_DOCUMENTS.md lines 355-814 for complete CLI flag documentation`,
 
       inputSchema: {
         type: "object",
         properties: {
           pattern: {
-            type: "string",
+            oneOf: [
+              {
+                type: "string",
+                description:
+                  "AST pattern with metavariables ($VAR, $$$NAME, $_). Must be valid syntax for target language.",
+              },
+              {
+                type: "object",
+                properties: {
+                  context: {
+                    type: "string",
+                    description:
+                      "Code context for pattern parsing. Example: 'class { $FIELD }' to match field definitions.",
+                  },
+                  selector: {
+                    type: "string",
+                    description:
+                      "AST kind to extract from context. Example: 'field_definition' to match only field nodes.",
+                  },
+                  strictness: {
+                    type: "string",
+                    enum: ["cst", "smart", "ast", "relaxed", "signature"],
+                    description: "Pattern-specific strictness override. Takes precedence over top-level strictness.",
+                  },
+                },
+                description:
+                  "Pattern object for advanced matching. Use when testing patterns with specific AST node selectors.",
+              },
+            ],
             description:
-              "AST pattern with metavariables ($VAR, $$$NAME, $_). Must be valid syntax for target language.",
+              "AST pattern (string or object). String form for simple patterns, object form for testing context-based patterns.",
           },
           code: {
             type: "string",
@@ -483,6 +589,18 @@ CLI: ast-grep run --pattern "console.log($ARG)" --lang js --json=stream --stdin
             type: "boolean",
             description:
               "Control output verbosity. Default: true. When false, returns simplified summary without detailed metavariable captures. Useful in CLI to prevent excessive output.",
+          },
+          strictness: {
+            type: "string",
+            enum: ["cst", "smart", "ast", "relaxed", "signature"],
+            description:
+              "Pattern matching strictness (default: 'smart'). Controls how precisely patterns must match AST nodes:\n" +
+              "- cst: Match exact CST nodes (most strict, includes all syntax)\n" +
+              "- smart: Match AST nodes except trivial tokens like parentheses (default, recommended)\n" +
+              "- ast: Match only named AST nodes (ignores unnamed nodes)\n" +
+              "- relaxed: Match AST nodes except comments (good for commented code)\n" +
+              "- signature: Match AST structure without text content (matches any identifier/literal)\n" +
+              "Useful for testing different matching modes to understand pattern behavior. See: https://ast-grep.github.io/advanced/match-algorithm.html",
           },
         },
         required: ["pattern", "code", "language"],

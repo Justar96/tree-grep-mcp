@@ -155,6 +155,8 @@ export class AstGrepBinaryManager {
     if (await this.testBinary(customPath)) {
       this.binaryPath = customPath;
       this.isInitialized = true;
+      const version = await this.extractBinaryVersion(customPath);
+      console.error(`ast-grep v${version} (custom: ${customPath})`);
     } else {
       throw new BinaryError(`Custom binary path "${customPath}" is not valid`);
     }
@@ -168,6 +170,8 @@ export class AstGrepBinaryManager {
     if (systemPath && (await this.testBinary(systemPath))) {
       this.binaryPath = systemPath;
       this.isInitialized = true;
+      const version = await this.extractBinaryVersion(systemPath);
+      console.error(`ast-grep v${version} (system: ${systemPath})`);
     } else {
       throw new BinaryError(
         "ast-grep not found in PATH. Please install ast-grep using one of the official methods:\n" +
@@ -180,138 +184,7 @@ export class AstGrepBinaryManager {
     }
   }
 
-  /**
-   * Download and cache a platform specific ast-grep binary when requested.
-   * @deprecated This method is no longer used as auto-install has been removed.
-   */
-  private async installPlatformBinary(): Promise<void> {
-    const platform = process.platform;
-    const arch = process.arch;
-    const totalStages = 4;
 
-    // Validate platform/architecture support
-    const supportedPlatforms = ["win32", "darwin", "linux"];
-    const supportedArchs = ["x64", "arm64"];
-
-    if (!supportedPlatforms.includes(platform)) {
-      console.error(`Unsupported platform: ${platform}. Falling back to system binary.`);
-      await this.useSystemBinary();
-      return;
-    }
-
-    if (!supportedArchs.includes(arch)) {
-      console.error(`Unsupported architecture: ${arch}. Falling back to system binary.`);
-      await this.useSystemBinary();
-      return;
-    }
-
-    // Internal path handling: Cache directory paths use platform-native separators.
-    // Node.js fs methods accept both forward and backslashes on Windows.
-    // Normalization is only needed when passing paths to ast-grep CLI.
-    const cacheDir = this.getDefaultCacheDir();
-
-    const binaryName = this.getBinaryName(platform, arch);
-    const binaryPath = PathValidator.normalizePath(path.join(cacheDir, binaryName));
-    const resolvedBinaryPath = await this.resolveExistingBinary(binaryPath, platform);
-
-    this.logStage(
-      1,
-      totalStages,
-      `Checking cached binary at ${(resolvedBinaryPath ?? binaryPath)}...`
-    );
-
-    // Check if binary exists in cache and is valid
-    if (resolvedBinaryPath) {
-      const expectedVersionForCache =
-        (await this.fetchLatestGitHubVersion()) ?? AstGrepBinaryManager.HARDCODED_VERSION;
-      let cacheValidated = false;
-
-      for (let attempt = 1; attempt <= AstGrepBinaryManager.CACHE_VALIDATION_RETRIES; attempt++) {
-        if (await this.testBinary(resolvedBinaryPath, expectedVersionForCache)) {
-          cacheValidated = true;
-          break;
-        }
-
-        if (attempt < AstGrepBinaryManager.CACHE_VALIDATION_RETRIES) {
-          const delay =
-            AstGrepBinaryManager.CACHE_VALIDATION_RETRY_DELAY_MS * Math.pow(2, attempt - 1);
-          console.error(
-            `Cache validation attempt ${attempt}/${AstGrepBinaryManager.CACHE_VALIDATION_RETRIES} failed, retrying in ${delay}ms...`
-          );
-          await new Promise((resolve) => setTimeout(resolve, delay));
-        }
-      }
-
-      if (cacheValidated) {
-        const version = await this.extractBinaryVersion(resolvedBinaryPath);
-        console.error(
-          `Using cached binary: ${resolvedBinaryPath} (version: ${version ?? "unknown"})`
-        );
-        this.binaryPath = resolvedBinaryPath;
-        this.isInitialized = true;
-        this.logStage(4, totalStages, "Installation complete");
-        return;
-      }
-
-      console.error(
-        `Cache validation failed after ${AstGrepBinaryManager.CACHE_VALIDATION_RETRIES} attempts, re-downloading binary`
-      );
-      try {
-        await fs.unlink(binaryPath);
-      } catch {
-        // Ignore cleanup errors
-      }
-
-      try {
-        await fs.unlink(resolvedBinaryPath);
-      } catch {
-        // Ignore cleanup errors
-      }
-      if (resolvedBinaryPath !== binaryPath) {
-        try {
-          await fs.unlink(binaryPath);
-        } catch {
-          // Ignore cleanup errors
-        }
-      }
-    }
-
-    // Try to download binary
-    try {
-      this.logStage(2, totalStages, `Downloading ast-grep binary for ${platform}-${arch}...`);
-      const version = await this.downloadBinary(platform, arch, binaryPath);
-      this.logStage(3, totalStages, "Validating downloaded binary version...");
-      console.error(`Using downloaded binary: ${binaryPath} (version: ${version ?? "unknown"})`);
-      this.binaryPath = binaryPath;
-      this.isInitialized = true;
-      this.logStage(4, totalStages, "Installation complete");
-    } catch (error) {
-      console.error(
-        `Failed to download binary: ${error instanceof Error ? error.message : String(error)}`
-      );
-      console.error("Falling back to system binary...");
-
-      // Fallback to system binary
-      try {
-        await this.useSystemBinary();
-      } catch (systemError) {
-        throw new BinaryError(
-          "Failed to install ast-grep binary automatically.\n\n" +
-            "RECOMMENDED: Install ast-grep from official sources for best compatibility:\n" +
-            "  • npm: npm install -g @ast-grep/cli\n" +
-            "  • cargo: cargo install ast-grep\n" +
-            "  • brew: brew install ast-grep\n" +
-            "  • pip: pip install ast-grep-cli\n" +
-            "  • Official guide: https://ast-grep.github.io/guide/quick-start.html\n\n" +
-            "ALTERNATIVE OPTIONS:\n" +
-            "  • Use --use-system if ast-grep is already installed\n" +
-            "  • Set AST_GREP_BINARY_PATH environment variable\n" +
-            "  • Check network connectivity for automatic download\n\n" +
-            `Error details:\n  Download error: ${error instanceof Error ? error.message : String(error)}\n  System binary error: ${systemError instanceof Error ? systemError.message : String(systemError)}`
-        );
-      }
-    }
-  }
 
   /**
    * Search the environment PATH for an ast-grep executable.
@@ -516,30 +389,7 @@ export class AstGrepBinaryManager {
     }
   }
 
-  /**
-   * Attempt to reuse an existing cached binary without triggering downloads.
-   * @deprecated This method is no longer used as auto-install has been removed.
-   */
-  private async tryUseCachedBinary(platform: string, arch: string): Promise<boolean> {
-    const cacheDir = this.getDefaultCacheDir();
-    const binaryName = this.getBinaryName(platform, arch);
-    const binaryPath = PathValidator.normalizePath(path.join(cacheDir, binaryName));
-    const resolvedBinaryPath = await this.resolveExistingBinary(binaryPath, platform);
 
-    if (!resolvedBinaryPath) {
-      return false;
-    }
-
-    if (!(await this.testBinary(resolvedBinaryPath))) {
-      return false;
-    }
-
-    this.binaryPath = resolvedBinaryPath;
-    this.isInitialized = true;
-    const version = await this.extractBinaryVersion(resolvedBinaryPath);
-    console.error(`Using cached binary: ${resolvedBinaryPath} (version: ${version ?? "unknown"})`);
-    return true;
-  }
 
   /**
    * Download a file with retry logic and exponential backoff.

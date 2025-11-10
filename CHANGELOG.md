@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Improved
+- **Tool Description Refactoring** - Comprehensive improvements to all four MCP tool descriptions for better reliability and clarity
+  - **SearchTool (ast_search)**: Reduced to 159 lines (from 168)
+    - Added PATTERN SYNTAX section consolidating metavariable rules
+    - Added ADVANCED OPTIONS section documenting all CLI flags (file filtering, performance, debugging, context, output, pattern control)
+    - Added CLI FLAG REFERENCE with complete MCP-to-CLI parameter mapping table
+    - Added 9 missing schema parameters: `before`, `after`, `globs`, `noIgnore`, `followSymlinks`, `threads`, `inspect`, `jsonStyle`, `selector`
+    - Added language normalization table (javascript→js, typescript→ts, python→py, etc.)
+    - Added example CLI commands and AST_GREP_DOCUMENTS.md references
+  - **ReplaceTool (ast_replace)**: Reduced to 187 lines (from 171, but added missing sections)
+    - Added PATTERN SYNTAX section (was completely missing)
+    - Added ADVANCED OPTIONS section documenting all CLI flags
+    - Added CLI FLAG REFERENCE with complete parameter mapping table
+    - Added 9 missing schema parameters: `context`, `before`, `after`, `globs`, `noIgnore`, `followSymlinks`, `threads`, `inspect`, `jsonStyle`, `selector`
+    - Consolidated metavariable consistency rules into PATTERN SYNTAX
+    - Added language normalization table and example CLI commands
+  - **ScanTool (ast_run_rule)**: Reduced to 299 lines (from 240, but added missing sections)
+    - Added ADVANCED OPTIONS section (was completely missing) documenting all CLI flags
+    - Added CLI FLAG REFERENCE with complete parameter mapping table
+    - Documented `verbose` parameter (was in schema but not in description)
+    - Added language normalization table and example CLI commands
+  - **ExplainTool (ast_explain_pattern)**: Reduced to 146 lines (from 129, but added missing sections)
+    - Added ADVANCED OPTIONS section (was completely missing)
+    - Added CLI FLAG REFERENCE with complete parameter mapping table
+    - Documented `verbose` parameter (was in schema but not in description)
+    - Added language normalization table and example CLI commands
+  - **Consistent Structure**: All tools now follow the same structure:
+    - QUICK START → WHEN TO USE/NOT TO USE → PATTERN SYNTAX → ERROR RECOVERY → ADVANCED OPTIONS → CLI FLAG REFERENCE
+  - **Complete Documentation**: All schema parameters now documented in descriptions
+  - **CLI Flag Transparency**: Complete mapping tables show exactly how MCP parameters translate to ast-grep CLI flags
+
+### Testing
+- Added 25 new description validation tests in `tests/description-validation.test.ts`
+  - Validates description length limits (SearchTool: 250, ReplaceTool: 250, ScanTool: 300, ExplainTool: 200)
+  - Validates all schema parameters are documented in descriptions
+  - Validates required sections are present (QUICK START, PATTERN SYNTAX, ADVANCED OPTIONS, CLI FLAG REFERENCE)
+  - Validates advanced parameters are documented (globs, noIgnore, followSymlinks, threads, inspect, verbose, etc.)
+- All 648 tests pass (12 skip, 0 fail) - no regressions
+
 ## [1.2.6] - 2025-11-07
 
 ### Changed

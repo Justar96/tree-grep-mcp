@@ -315,7 +315,8 @@ export function countRetryAttempts(messages: string[]): number {
 // ============================================
 
 /**
- * Assert that CLI args contain a specific flag with expected value
+ * Assert that CLI args contain a specific flag with expected value.
+ * For flags that can appear multiple times (like --globs), finds the first occurrence with the expected value.
  *
  * @param args - CLI arguments array
  * @param flag - Flag name (e.g., "--pattern", "--lang")
@@ -323,26 +324,43 @@ export function countRetryAttempts(messages: string[]): number {
  * @throws Error if flag not found or value mismatch
  */
 export function assertCliFlag(args: string[], flag: string, expectedValue: string | null): void {
-  const flagIndex = args.indexOf(flag);
-  if (flagIndex === -1) {
+  // Boolean flag (no value after it)
+  if (expectedValue === null) {
+    if (!args.includes(flag)) {
+      throw new Error(
+        `Expected CLI flag "${flag}" not found in args:\n${JSON.stringify(args, null, 2)}`
+      );
+    }
+    return;
+  }
+
+  // For flags with values, collect all occurrences
+  const flagIndices: number[] = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === flag) {
+      flagIndices.push(i);
+    }
+  }
+
+  if (flagIndices.length === 0) {
     throw new Error(
       `Expected CLI flag "${flag}" not found in args:\n${JSON.stringify(args, null, 2)}`
     );
   }
 
-  if (expectedValue !== null) {
+  // Check if any occurrence has the expected value
+  for (const flagIndex of flagIndices) {
     const actualValue = args[flagIndex + 1];
-    if (actualValue === undefined) {
-      throw new Error(
-        `Expected CLI flag "${flag}" to have value "${expectedValue}" but no value found`
-      );
-    }
-    if (actualValue !== expectedValue) {
-      throw new Error(
-        `Expected CLI flag "${flag}" to have value "${expectedValue}" but got "${actualValue}"`
-      );
+    if (actualValue === expectedValue) {
+      return; // Found matching value
     }
   }
+
+  // If we get here, no occurrence had the expected value
+  const actualValues = flagIndices.map((idx) => args[idx + 1]).filter((v) => v !== undefined);
+  throw new Error(
+    `Expected CLI flag "${flag}" to have value "${expectedValue}" but got: ${actualValues.join(", ")}`
+  );
 }
 
 /**

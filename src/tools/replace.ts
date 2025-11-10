@@ -3,16 +3,33 @@ import { AstGrepBinaryManager } from "../core/binary-manager.js";
 import { WorkspaceManager } from "../core/workspace-manager.js";
 import { ValidationError, ExecutionError } from "../types/errors.js";
 import { PatternValidator, ParameterValidator, PathValidator } from "../utils/validation.js";
+import type { InspectGranularity, NoIgnoreOption } from "../types/cli.js";
+
+interface PatternObject {
+  context?: string;
+  selector?: string;
+  strictness?: "cst" | "smart" | "ast" | "relaxed" | "signature";
+}
 
 interface ReplaceParams {
-  pattern: string;
+  pattern: string | PatternObject;
   replacement: string;
   language?: string;
   paths?: string[];
   code?: string;
+  context?: number;
+  before?: number;
+  after?: number;
   dryRun?: boolean;
   timeoutMs?: number;
   verbose?: boolean;
+  strictness?: "cst" | "smart" | "ast" | "relaxed" | "signature";
+  globs?: string[];
+  noIgnore?: NoIgnoreOption[];
+  followSymlinks?: boolean;
+  threads?: number;
+  inspect?: InspectGranularity;
+  maxDepth?: number;
 }
 
 interface ChangeEntry {
@@ -47,26 +64,60 @@ export class ReplaceTool {
     // Runtime parameter validation with type narrowing
     const params = paramsRaw as unknown as ReplaceParams;
 
-    // Validate pattern
-    if (!params.pattern || typeof params.pattern !== "string") {
-      throw new ValidationError("Pattern is required and must be a string");
+    // Validate pattern (string or object)
+    if (!params.pattern) {
+      throw new ValidationError("Pattern is required");
     }
 
-    const patternValidation = PatternValidator.validatePattern(
-      params.pattern,
-      typeof params.language === "string" ? params.language : undefined
-    );
-    if (!patternValidation.valid) {
-      throw new ValidationError(`Invalid pattern: ${patternValidation.errors.join("; ")}`, {
-        errors: patternValidation.errors,
-      });
-    }
+    // Determine if pattern is string or object, and extract components
+    let patternString: string;
+    let selector: string | undefined;
+    let patternStrictness: string | undefined;
 
-    // Log pattern warnings if any - log each warning individually for better test assertions
-    if (patternValidation.warnings && patternValidation.warnings.length > 0) {
-      for (const warning of patternValidation.warnings) {
-        console.error(`Warning: ${warning}`);
+    if (typeof params.pattern === "string") {
+      // String pattern
+      patternString = params.pattern;
+
+      const patternValidation = PatternValidator.validatePattern(
+        patternString,
+        typeof params.language === "string" ? params.language : undefined
+      );
+      if (!patternValidation.valid) {
+        throw new ValidationError(`Invalid pattern: ${patternValidation.errors.join("; ")}`, {
+          errors: patternValidation.errors,
+        });
       }
+
+      // Log warnings if any
+      if (patternValidation.warnings && patternValidation.warnings.length > 0) {
+        for (const warning of patternValidation.warnings) {
+          console.error(`Warning: ${warning}`);
+        }
+      }
+    } else if (PatternValidator.isPatternObject(params.pattern)) {
+      // Pattern object
+      const patternObj = params.pattern as PatternObject;
+      const objValidation = PatternValidator.validatePatternObject(patternObj);
+
+      if (!objValidation.valid) {
+        throw new ValidationError(`Invalid pattern object: ${objValidation.errors.join("; ")}`, {
+          errors: objValidation.errors,
+        });
+      }
+
+      // Log warnings if any
+      if (objValidation.warnings && objValidation.warnings.length > 0) {
+        for (const warning of objValidation.warnings) {
+          console.error(`Warning: ${warning}`);
+        }
+      }
+
+      // Extract components
+      patternString = patternObj.context || patternObj.selector || "";
+      selector = patternObj.selector;
+      patternStrictness = patternObj.strictness;
+    } else {
+      throw new ValidationError("Pattern must be a string or pattern object");
     }
 
     // Validate replacement
@@ -94,12 +145,12 @@ export class ReplaceTool {
       }
     }
 
-    // Validate metavariable consistency between pattern and replacement
+    // Validate metavariable consistency between pattern string and replacement
     // This ensures all metavariables used in replacement are defined in pattern
     // Example: pattern="foo($A)" with replacement="bar($B)" will fail
     // Unused pattern metavariables generate warnings (may be intentional)
     const metavarValidation = PatternValidator.compareMetavariables(
-      params.pattern,
+      patternString,
       params.replacement
     );
     if (!metavarValidation.valid) {
@@ -122,6 +173,38 @@ export class ReplaceTool {
     }
 
     // Validate optional parameters with actionable error messages
+    const contextValidation = ParameterValidator.validateContext(params.context);
+    if (!contextValidation.valid) {
+      throw new ValidationError(contextValidation.errors.join("; "), {
+        errors: contextValidation.errors,
+      });
+    }
+
+    const beforeValidation = ParameterValidator.validateContextWindow("before", params.before);
+    if (!beforeValidation.valid) {
+      throw new ValidationError(beforeValidation.errors.join("; "), {
+        errors: beforeValidation.errors,
+      });
+    }
+
+    const afterValidation = ParameterValidator.validateContextWindow("after", params.after);
+    if (!afterValidation.valid) {
+      throw new ValidationError(afterValidation.errors.join("; "), {
+        errors: afterValidation.errors,
+      });
+    }
+
+    const contextComboValidation = ParameterValidator.validateContextCombination(
+      params.context,
+      params.before,
+      params.after
+    );
+    if (!contextComboValidation.valid) {
+      throw new ValidationError(contextComboValidation.errors.join("; "), {
+        errors: contextComboValidation.errors,
+      });
+    }
+
     const timeoutValidation = ParameterValidator.validateTimeout(params.timeoutMs);
     if (!timeoutValidation.valid) {
       throw new ValidationError(timeoutValidation.errors.join("; "), {
@@ -136,6 +219,26 @@ export class ReplaceTool {
       });
     }
 
+    // Validate maxDepth if provided
+    if (params.maxDepth !== undefined) {
+      if (typeof params.maxDepth !== "number" || !Number.isFinite(params.maxDepth)) {
+        throw new ValidationError("maxDepth must be a finite number");
+      }
+      if (params.maxDepth < 1 || params.maxDepth > 20) {
+        throw new ValidationError("maxDepth must be between 1 and 20");
+      }
+    }
+
+    // Validate strictness if provided
+    if (params.strictness !== undefined) {
+      const validStrictness = ["cst", "smart", "ast", "relaxed", "signature"];
+      if (typeof params.strictness !== "string" || !validStrictness.includes(params.strictness)) {
+        throw new ValidationError(
+          `Invalid strictness. Must be one of: ${validStrictness.join(", ")}`
+        );
+      }
+    }
+
     // Set default verbose value to true
     const isVerbose = params.verbose !== false;
 
@@ -145,6 +248,43 @@ export class ReplaceTool {
         errors: codeValidation.errors,
       });
     }
+
+    const globsValidation = ParameterValidator.validateGlobs(params.globs);
+    if (!globsValidation.valid) {
+      throw new ValidationError(globsValidation.errors.join("; "), { errors: globsValidation.errors });
+    }
+
+    const noIgnoreValidation = ParameterValidator.validateNoIgnore(params.noIgnore);
+    if (!noIgnoreValidation.valid) {
+      throw new ValidationError(noIgnoreValidation.errors.join("; "), {
+        errors: noIgnoreValidation.errors,
+      });
+    }
+
+    const followValidation = ParameterValidator.validateBooleanOption(
+      params.followSymlinks,
+      "followSymlinks"
+    );
+    if (!followValidation.valid) {
+      throw new ValidationError(followValidation.errors.join("; "), {
+        errors: followValidation.errors,
+      });
+    }
+
+    const threadsValidation = ParameterValidator.validateThreads(params.threads);
+    if (!threadsValidation.valid) {
+      throw new ValidationError(threadsValidation.errors.join("; "), {
+        errors: threadsValidation.errors,
+      });
+    }
+
+    const inspectValidation = ParameterValidator.validateInspect(params.inspect);
+    if (!inspectValidation.valid) {
+      throw new ValidationError(inspectValidation.errors.join("; "), {
+        errors: inspectValidation.errors,
+      });
+    }
+
 
     const normalizeLang = (lang: string) => {
       const map: Record<string, string> = {
@@ -172,11 +312,59 @@ export class ReplaceTool {
     };
 
     // Build ast-grep command directly
-    const args = ["run", "--pattern", params.pattern.trim(), "--rewrite", params.replacement];
+    const args = ["run", "--pattern", patternString.trim(), "--rewrite", params.replacement];
 
     // Add language if provided
     if (params.language) {
       args.push("--lang", normalizeLang(params.language));
+    }
+
+    // Add selector if from pattern object
+    if (selector) {
+      args.push("--selector", selector);
+    }
+
+    // Add strictness (from pattern object or top-level param)
+    // Pattern object strictness takes precedence over top-level param
+    const effectiveStrictness = patternStrictness || params.strictness;
+    if (effectiveStrictness) {
+      args.push("--strictness", effectiveStrictness);
+    }
+
+    if (params.context && params.context > 0) {
+      args.push("--context", params.context.toString());
+    }
+
+    if (typeof params.before === "number" && params.before > 0) {
+      args.push("--before", params.before.toString());
+    }
+
+    if (typeof params.after === "number" && params.after > 0) {
+      args.push("--after", params.after.toString());
+    }
+
+    if (params.globs && params.globs.length > 0) {
+      for (const glob of params.globs) {
+        args.push("--globs", glob);
+      }
+    }
+
+    if (params.noIgnore && params.noIgnore.length > 0) {
+      for (const ignoreType of params.noIgnore) {
+        args.push("--no-ignore", ignoreType);
+      }
+    }
+
+    if (params.followSymlinks) {
+      args.push("--follow");
+    }
+
+    if (typeof params.threads === "number") {
+      args.push("--threads", params.threads.toString());
+    }
+
+    if (params.inspect) {
+      args.push("--inspect", params.inspect);
     }
 
     // Handle dry-run vs actual replacement
@@ -186,13 +374,21 @@ export class ReplaceTool {
     }
     // Note: ast-grep run --rewrite outputs diff format by default (perfect for dry-run)
 
+    // Create workspace manager with custom maxDepth if provided
+    const workspaceManager = params.maxDepth !== undefined
+      ? new WorkspaceManager({
+          explicitRoot: this.workspaceManager.getWorkspaceRoot(),
+          maxDepth: params.maxDepth
+        })
+      : this.workspaceManager;
+
     // Handle inline code vs file paths
     const executeOptions: {
       cwd: string;
       timeout: number;
       stdin?: string;
     } = {
-      cwd: this.workspaceManager.getWorkspaceRoot(),
+      cwd: workspaceManager.getWorkspaceRoot(),
       timeout: params.timeoutMs || 60000,
     };
 
@@ -211,7 +407,7 @@ export class ReplaceTool {
 
       // Warn when scanning entire workspace with default path
       if (!pathsProvided) {
-        const workspaceRoot = this.workspaceManager.getWorkspaceRoot();
+        const workspaceRoot = workspaceManager.getWorkspaceRoot();
         const home = process.env.HOME || process.env.USERPROFILE || "";
 
         // Prevent scanning from home directory or common user directories
@@ -264,7 +460,7 @@ export class ReplaceTool {
       );
 
       // Validate paths for security (but don't use the absolute resolved paths)
-      const { valid, errors } = this.workspaceManager.validatePaths(normalizedPaths);
+      const { valid, errors } = workspaceManager.validatePaths(normalizedPaths);
       if (!valid) {
         // Replace normalized paths in error messages with original paths
         const originalErrors = errors.map((err) => {
@@ -433,187 +629,203 @@ export class ReplaceTool {
   static getSchema() {
     return {
       name: "ast_replace",
-      description: `Structural code replacement using AST pattern matching. SAFE BY DEFAULT - runs in preview mode (dryRun: true) unless explicitly set to false. Returns diff preview and change statistics.
+      description: `Replace code by AST structure (not text). SAFE BY DEFAULT - previews changes unless dryRun: false.
 
-QUICK START:
-Preview replacement on inline code (safe, language REQUIRED):
-{ "pattern": "console.log($ARG)", "replacement": "logger.info($ARG)", "code": "console.log('test');", "language": "javascript" }
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚠️ SAFETY FIRST
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Preview replacement on files (safe):
-{ "pattern": "var $NAME = $VALUE", "replacement": "const $NAME = $VALUE", "paths": ["/workspace/src/"], "dryRun": true }
+🛡️ SAFE BY DEFAULT: dryRun: true (preview only, NO files modified)
+⚡ TO APPLY CHANGES: Set dryRun: false AFTER reviewing preview
+📋 ALWAYS review the diff preview before applying changes
 
-Apply changes after reviewing preview:
-{ "pattern": "var $NAME = $VALUE", "replacement": "const $NAME = $VALUE", "paths": ["/workspace/src/"], "dryRun": false }
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚡ REQUIRED PARAMETERS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-WHEN TO USE:
-• Automated refactoring (rename functions, change APIs, update patterns)
-• Code modernization (convert old syntax to new syntax)
-• Bulk updates across multiple files
-• Testing patterns before creating rules with ast_run_rule
+• pattern (string) - AST pattern to match (with metavariables)
+• replacement (string) - Replacement template (reuses pattern metavariables)
+• language (string) - REQUIRED when using 'code' parameter
+• paths (array) - Absolute paths to modify (e.g., ["/workspace/src/"])
+  OR
+• code (string) - Inline code to modify (requires language parameter)
 
-WHEN NOT TO USE:
-• Simple text replacement → Use sed for faster, simpler text substitution
-• Need conditional replacements based on metavariable values → Use ast_run_rule with where constraints and fix
-• Adding new elements without existing structure → Manual editing required
-• Regex-based find and replace → Use sed or your editor's find/replace
-• Control flow refactoring (complex if/with/try blocks) → Limited support, may require manual editing
-• Need to filter replacements by metavariable content → Use ast_run_rule with constraints
+CRITICAL: Pattern and replacement must use SAME metavariable names!
+✓ pattern: "var $NAME = $VALUE", replacement: "const $NAME = $VALUE"
+✗ pattern: "var $NAME = $VALUE", replacement: "const $X = $Y" (FAILS validation)
 
-METAVARIABLE CONSISTENCY:
-Pattern and replacement must use consistent metavariable names:
-• $VAR in pattern → reuse $VAR in replacement
-• $$$ARGS in pattern → reuse $$$ARGS in replacement
-• Can reorder, duplicate, or omit metavariables in replacement
-• $_ (anonymous) can appear in pattern but NOT in replacement
-• Multi-node metavariables MUST be named (bare $$$ rejected)
-• Case-sensitive: $VAR and $var are different metavariables
-• Unused pattern metavariables generate warnings (may be intentional)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🚀 QUICK START (Copy & Modify)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-COMMON REPLACEMENT PATTERNS:
+1. Preview replacement on inline code (SAFE):
+   { "pattern": "console.log($ARG)", "replacement": "logger.info($ARG)", "code": "console.log('test');", "language": "javascript" }
 
-1. Simple renaming:
-   Pattern: "oldFunction($$$ARGS)"
-   Replacement: "newFunction($$$ARGS)"
+2. Preview replacement on files (SAFE):
+   { "pattern": "var $NAME = $VALUE", "replacement": "const $NAME = $VALUE", "paths": ["/workspace/src/"], "dryRun": true }
 
-2. API migration:
-   Pattern: "jQuery($SELECTOR).click($HANDLER)"
-   Replacement: "document.querySelector($SELECTOR).addEventListener('click', $HANDLER)"
+3. Apply changes after reviewing preview:
+   { "pattern": "var $NAME = $VALUE", "replacement": "const $NAME = $VALUE", "paths": ["/workspace/src/"], "dryRun": false }
 
-3. Syntax modernization:
-   Pattern: "var $NAME = $VALUE"
-   Replacement: "const $NAME = $VALUE"
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔧 TROUBLESHOOTING FAILURES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-4. Function to arrow function:
-   Pattern: "function $NAME($$$PARAMS) { $$$BODY }"
-   Replacement: "const $NAME = ($$$PARAMS) => { $$$BODY }"
-
-5. Adding arguments:
-   Pattern: "logger.log($MSG)"
-   Replacement: "logger.log('INFO', $MSG)"
-
-6. Reordering:
-   Pattern: "compare($A, $B)"
-   Replacement: "compare($B, $A)"
-
-7. Wrapping expressions (be specific to avoid matching everything):
-   Pattern: "fetch($URL)"
-   Replacement: "await fetch($URL)"
-
-PATTERN LIBRARY:
-For more pattern examples, see: https://github.com/justar96/tree-grep-mcp/blob/main/PATTERN_LIBRARY.md
-
-ERROR RECOVERY:
-
-If replacement fails, check these common issues:
-
-1. "Language required for inline code"
-   → Add language parameter when using code parameter
-   → Example: { pattern: "$P", replacement: "$R", code: "test", language: "javascript" }
-
-2. "Metavariable mismatch: $VAR used in replacement but not in pattern"
-   → Ensure all replacement metavariables are defined in pattern
+1. ❌ "Metavariable mismatch: $VAR used in replacement but not in pattern"
+   → Ensure ALL replacement metavariables exist in pattern
    → Example: pattern="foo($A)" replacement="bar($B)" is INVALID
    → Fix: pattern="foo($A)" replacement="bar($A)"
 
-3. "Invalid pattern/replacement: Use named multi-node metavariables like $$ARGS"
-   → Replace "$$$" with "$$$NAME"
-   → Pattern and replacement must use same names
+2. ❌ "Language required for inline code"
+   → Add language parameter when using code parameter
+   → Example: { pattern: "$P", replacement: "$R", code: "test", language: "javascript" }
 
-4. "Invalid paths"
-   → Use absolute paths like '/workspace/src/' or 'C:/workspace/src/'
-   → Relative paths are not supported (will be rejected with validation error)
-   → Paths validated against workspace root for security
-   → Omit paths to modify entire workspace (defaults to current directory)
+3. ❌ "Invalid paths" or "Path must be absolute"
+   → Use absolute paths: "/workspace/src/" not "src/"
+   → Or omit paths to modify entire workspace
 
-5. Warning: "Metavariable $X in pattern is not used in replacement"
+4. ⚠️ Warning: "Metavariable $X in pattern is not used in replacement"
    → Not an error, but may be unintentional
    → Pattern captures $X but replacement omits it
    → Example: pattern="foo($A, $B)" replacement="bar($A)" (drops $B)
 
-6. Timeout errors
-   → Increase timeoutMs (default: 60000ms, max: 300000ms)
-   → Narrow paths to specific directories
-   → Break large replacements into smaller passes
-   → Recommended by repo size:
-     Small (<1K files): 60000ms (default)
-     Medium (1K-10K): 120000-180000ms
-     Large (>10K): 180000-300000ms
+5. ✓ No error but changes: [] (empty array)
+   → Pattern is valid but matched nothing
+   → Test pattern with ast_search first to verify matches
+   → Check pattern syntax matches language AST
 
-7. Empty changes array (no matches)
-   → Pattern is valid but matched nothing (not an error)
-   → Verify pattern syntax matches language AST
-   → Try pattern on inline code first to test
+WHEN TO USE THIS TOOL:
+• Automated refactoring (rename functions, change APIs)
+• Code modernization (convert old syntax to new syntax)
+• Bulk updates across multiple files
 
-DRY-RUN BEHAVIOR:
-• dryRun: true (DEFAULT) → Shows diff preview, NO files modified, safe to run
-• dryRun: false → Applies changes to files IMMEDIATELY, use after reviewing preview
-• Output includes diff preview (when dryRun=true) or confirmation (when dryRun=false)
-• ALWAYS review dry-run output before setting dryRun=false
+WHEN NOT TO USE:
+• Simple text replacement → Use sed (faster for plain text)
+• Need conditional replacements → Use ast_run_rule with where constraints
+• Adding new elements → Manual editing required
 
-BEST PRACTICES:
-• Always test with dryRun=true first to preview changes
-• Use for structural code refactoring, not simple text replacement
-• Test patterns on inline code before applying to files
-• Break large replacements into smaller, focused passes
-• Specify language for better parsing and validation
-• Review diff preview carefully before applying changes
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📝 METAVARIABLE RULES (Critical)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-LIMITATIONS:
-• Replacement must be valid syntax for target language
-• Cannot add structural elements without matching existing ones
-• Complex transformations may require multiple passes
-• Metavariables must be complete AST nodes ($OBJ.$PROP, not $VAR.prop)
-• Paths must be within workspace root (security constraint)
-• Path depth limited to 6 levels from workspace root (use parent directories for deep paths)
-• Control flow refactoring (if/with/try blocks) has limited support
-• Multi-line patterns with newlines may not match - prefer single-line patterns
-• Not suitable for simple text replacement - use sed instead
-• Indentation-sensitive for multi-line patterns
+Pattern and replacement MUST use same metavariable names:
+✓ pattern: "var $NAME = $VALUE", replacement: "const $NAME = $VALUE"
+✗ pattern: "var $NAME = $VALUE", replacement: "const $X = $Y"
 
-OPERATION MODES:
+You can:
+• Reorder: pattern="compare($A, $B)", replacement="compare($B, $A)"
+• Duplicate: pattern="log($MSG)", replacement="log($MSG, $MSG)"
+• Omit: pattern="foo($A, $B)", replacement="bar($A)" (generates warning)
 
-Inline Code Mode (for testing):
-• Use code parameter with language (REQUIRED)
-• Safe way to test patterns before applying to files
-• Example: { pattern: "console.log($A)", replacement: "logger.info($A)", code: "console.log('test');", language: "javascript" }
+You cannot:
+• Use different names: $NAME in pattern, $X in replacement (validation error)
+• Use $_ in replacement (anonymous matches can't be referenced)
+• Use bare $$$ (must be named: $$$ARGS)
 
-File Mode (for actual changes):
-• Specify paths or omit for entire workspace
-• Language optional but recommended for performance
-• ALWAYS test with dryRun=true first
-• Example: { pattern: "var $N = $V", replacement: "const $N = $V", paths: ["/workspace/src/"], dryRun: true }
+Common Replacement Patterns:
+• Simple renaming: "oldFunction($$$ARGS)" → "newFunction($$$ARGS)"
+• API migration: "jQuery($SEL).click($H)" → "document.querySelector($SEL).addEventListener('click', $H)"
+• Syntax modernization: "var $NAME = $VALUE" → "const $NAME = $VALUE"
+• Function to arrow: "function $N($$$P) { $$$B }" → "const $N = ($$$P) => { $$$B }"
+• Adding arguments: "logger.log($MSG)" → "logger.log('INFO', $MSG)"
 
-OUTPUT STRUCTURE:
-• changes: Array of { file, matches, preview (if dryRun), applied (if not dryRun) }
-• summary: { totalChanges, filesModified, dryRun, warnings (if any) }
-• Diff preview shows exact line changes when dryRun=true
-• Change counts are estimates - review diff preview for accuracy
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚙️ ADVANCED OPTIONS (Optional)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-PERFORMANCE:
-• Default timeout: 60000ms (higher than search due to rewriting overhead)
-• Specify language for faster parsing
-• Use specific paths vs entire workspace
-• Break large replacements into smaller targeted passes
+File Filtering:
+• globs: ["**/*.ts", "!**/*.test.ts"] - Include/exclude patterns
+• noIgnore: ["hidden", "dot"] - Search hidden files
+• followSymlinks: true - Follow symbolic links (default: false)
 
-REFERENCE - MCP to ast-grep CLI Mapping:
-pattern → --pattern <value>
-replacement → --rewrite <value>
-language → --lang <value>
-code → --stdin (with stdin input)
-paths → positional arguments
-dryRun: false → --update-all flag
-dryRun: true (default) → no flag (preview mode)
-timeoutMs → process timeout (not a CLI flag)
+Performance:
+• threads: 4 - Parallel threads (default: 0 = auto-detect)
+• timeoutMs: 60000 - Timeout in ms (default: 60000, max: 300000)
+• maxDepth: 15 - Max directory depth from workspace root (1-20, default: 10)
+
+Context:
+• context: 3 - Lines around match (0-100)
+• before: 2, after: 5 - Asymmetric context (conflicts with context)
+
+Output:
+• verbose: false - Simplified output (default: true)
+• jsonStyle: "stream" - Format: stream/pretty/compact
+
+Debugging:
+• inspect: "summary" - Show scan stats (nothing/summary/entity)
+• strictness: "smart" - Match precision (cst/smart/ast/relaxed/signature)
+• selector: "field_definition" - Extract specific AST node type (advanced)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+💡 BEST PRACTICES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. ALWAYS test with dryRun: true first (default behavior)
+2. Review diff preview carefully before setting dryRun: false
+3. Test patterns on inline code before applying to files
+4. Break large replacements into smaller, focused passes
+5. Use ast_search first to verify pattern matches correctly
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📚 CLI FLAG MAPPING (For Reference)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+MCP Parameter → ast-grep CLI Flag:
+• pattern → --pattern <value>
+• replacement → --rewrite <value>
+• language → --lang <normalized> (javascript→js, typescript→ts, python→py)
+• code → --stdin (with stdin input)
+• paths → positional arguments (absolute paths)
+• dryRun: false → --update-all (applies changes)
+• dryRun: true → no flag (preview mode, default)
+• context → --context <number>
+• before/after → --before/--after <number>
+• globs → --globs <pattern> (repeatable)
+• noIgnore → --no-ignore <option> (repeatable)
+• followSymlinks → --follow
+• threads → --threads <number>
+• inspect → --inspect <granularity>
+• strictness → --strictness <level>
 
 Example: { pattern: "var $N = $V", replacement: "const $N = $V", paths: ["/workspace/src/"], dryRun: true }
-CLI: ast-grep run --pattern "var $N = $V" --rewrite "const $N = $V" /workspace/src/ (no --update-all = preview)`,
+→ ast-grep run --pattern "var $N = $V" --rewrite "const $N = $V" /workspace/src/
+
+Reference: AST_GREP_DOCUMENTS.md lines 355-814`,
 
       inputSchema: {
         type: "object",
         properties: {
           pattern: {
-            type: "string",
-            description: "AST pattern to match. Must use same metavariable names as replacement.",
+            oneOf: [
+              {
+                type: "string",
+                description: "AST pattern to match. Must use same metavariable names as replacement.",
+              },
+              {
+                type: "object",
+                properties: {
+                  context: {
+                    type: "string",
+                    description:
+                      "Code context for pattern parsing. Example: 'class { $FIELD }' to match field definitions.",
+                  },
+                  selector: {
+                    type: "string",
+                    description:
+                      "AST kind to extract from context. Example: 'field_definition' to match only field nodes.",
+                  },
+                  strictness: {
+                    type: "string",
+                    enum: ["cst", "smart", "ast", "relaxed", "signature"],
+                    description: "Pattern-specific strictness override. Takes precedence over top-level strictness.",
+                  },
+                },
+                description:
+                  "Pattern object for advanced matching. Use when you need to match specific AST node types within a context.",
+              },
+            ],
+            description:
+              "AST pattern (string or object). String form for simple patterns, object form for advanced context-based matching.",
           },
           replacement: {
             type: "string",
@@ -650,6 +862,80 @@ CLI: ast-grep run --pattern "var $N = $V" --rewrite "const $N = $V" /workspace/s
             type: "boolean",
             description:
               "Control output verbosity. Default: true. When false, returns simplified summary without detailed change information. Useful in CLI to prevent excessive output.",
+          },
+          strictness: {
+            type: "string",
+            enum: ["cst", "smart", "ast", "relaxed", "signature"],
+            description:
+              "Pattern matching strictness (default: 'smart'). Controls how precisely patterns must match AST nodes:\n" +
+              "- cst: Match exact CST nodes (most strict, includes all syntax)\n" +
+              "- smart: Match AST nodes except trivial tokens like parentheses (default, recommended)\n" +
+              "- ast: Match only named AST nodes (ignores unnamed nodes)\n" +
+              "- relaxed: Match AST nodes except comments (good for commented code)\n" +
+              "- signature: Match AST structure without text content (matches any identifier/literal)\n" +
+              "See: https://ast-grep.github.io/advanced/match-algorithm.html",
+          },
+          context: {
+            type: "number",
+            description:
+              "Lines of context around each match (0-100). Conflicts with before/after parameters. Use for balanced context.",
+          },
+          before: {
+            type: "number",
+            description:
+              "Lines before each match (0-100). Conflicts with context parameter. Use with after for asymmetric context.",
+          },
+          after: {
+            type: "number",
+            description:
+              "Lines after each match (0-100). Conflicts with context parameter. Use with before for asymmetric context.",
+          },
+          globs: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Include/exclude file patterns (.gitignore-style). Example: ['**/*.ts', '!**/*.test.ts'] includes TypeScript files but excludes tests. Patterns starting with '!' are exclusions.",
+          },
+          noIgnore: {
+            type: "array",
+            items: {
+              type: "string",
+              enum: ["hidden", "dot", "exclude", "global", "parent", "vcs"],
+            },
+            description:
+              "Override .gitignore rules. Options: 'hidden' (search hidden files), 'dot' (search dot files), 'exclude' (ignore .ignore files), 'global' (ignore global gitignore), 'parent' (ignore parent gitignore), 'vcs' (ignore VCS ignore files).",
+          },
+          followSymlinks: {
+            type: "boolean",
+            description:
+              "Follow symbolic links when traversing directories (default: false). Enable to search through symlinked directories.",
+          },
+          threads: {
+            type: "number",
+            description:
+              "Number of parallel threads for searching (default: auto-detected CPU cores). Increase for faster searches on multi-core systems, decrease to reduce resource usage.",
+          },
+          inspect: {
+            type: "string",
+            enum: ["pattern", "file", "full"],
+            description:
+              "Show detailed AST information for debugging. Options: 'pattern' (show pattern AST only), 'file' (show file AST only), 'full' (show both pattern and file AST). Useful for understanding why patterns don't match.",
+          },
+          jsonStyle: {
+            type: "string",
+            enum: ["pretty", "compact", "stream"],
+            description:
+              "JSON output format. Options: 'pretty' (formatted with indentation), 'compact' (single-line), 'stream' (one JSON object per line, default). Stream format is most efficient for large result sets.",
+          },
+          selector: {
+            type: "string",
+            description:
+              "AST node type to extract from pattern context (advanced). Use with pattern object's context field to match specific node types. Example: 'field_definition' to match only field nodes within a class context.",
+          },
+          maxDepth: {
+            type: "number",
+            description:
+              "Maximum directory depth for path validation (1-20). Default: 10. Controls how deep paths can be from workspace root. Example: maxDepth=5 allows /workspace/a/b/c/d/e/ but rejects /workspace/a/b/c/d/e/f/.",
           },
         },
         required: ["pattern", "replacement"],

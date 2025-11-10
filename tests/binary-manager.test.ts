@@ -494,180 +494,9 @@ describe("AstGrepBinaryManager - Custom Binary Path Validation", () => {
   });
 });
 
-describe("AstGrepBinaryManager - Platform-specific Installation", () => {
-  test("getBinaryName produces OS-specific names", () => {
-    const manager = new AstGrepBinaryManager();
-    const getBinaryName = (
-      manager as unknown as { getBinaryName: (platform: string, arch: string) => string }
-    ).getBinaryName;
-
-    expect(getBinaryName.call(manager, "linux", "x64")).toBe("ast-grep-linux-x64");
-    expect(getBinaryName.call(manager, "darwin", "arm64")).toBe("ast-grep-darwin-arm64");
-    expect(getBinaryName.call(manager, "win32", "x64")).toBe("ast-grep-win32-x64.exe");
-  });
-
-  test.skip("installPlatformBinary falls back to system binary for unsupported platform", async () => {
-    const tempDir = await ensureTempDir("platform-fallback");
-    const binaryPath = await createCrossPlatformStubBinary(tempDir);
-    process.env.PATH = `${tempDir}${path.delimiter}${ORIGINAL_PATH}`;
-
-    const manager = new AstGrepBinaryManager({
-      platform: "unsupported-platform" as "darwin" | "linux" | "win32" | "auto",
-      autoInstall: true,
-    });
-
-    const capture = new StderrCapture();
-    capture.start();
-    await (
-      manager as unknown as { installPlatformBinary: () => Promise<void> }
-    ).installPlatformBinary();
-    capture.stop();
-
-    const messages = capture.getMessages();
-    expect(messages.some((msg) => msg.includes("Unsupported platform"))).toBe(true);
-    expect(manager.getBinaryPath()).toBe(binaryPath);
-  });
-
-  test("installPlatformBinary handles unsupported platform gracefully", async () => {
-    // Test unsupported platform via options.platform (already covered in a separate test)
-    // This test is removed as per Comment 3: avoid mutating process.arch
-    // Unsupported architecture case is already tested via unsupported platform test
-  });
-
-  const testNonWindowsOnly = process.platform !== "win32" ? test : test.skip;
-
-  testNonWindowsOnly("installPlatformBinary reuses valid cached binary", async () => {
-    const cacheDir = await ensureTempDir("platform-cache");
-    const manager = new AstGrepBinaryManager({
-      platform: process.platform as "linux",
-      autoInstall: true,
-      cacheDir,
-    });
-
-    const binaryName = (
-      manager as unknown as { getBinaryName: (platform: string, arch: string) => string }
-    ).getBinaryName.call(manager, process.platform, process.arch);
-    const cachedPath = await createCrossPlatformStubBinary(cacheDir, {
-      baseName: binaryName,
-    });
-    await fs.chmod(cachedPath, 0o755);
-    process.env.AST_GREP_STUB_VERSION = "9.99.9";
-
-    const capture = new StderrCapture();
-    capture.start();
-    await (
-      manager as unknown as { installPlatformBinary: () => Promise<void> }
-    ).installPlatformBinary();
-    capture.stop();
-
-    const messages = capture.getMessages();
-    expect(messages.some((msg) => msg.includes("Using cached binary"))).toBe(true);
-    assertStageLogging(messages, 1, 4);
-    expect(manager.getBinaryPath()).toBe(cachedPath);
-  });
-});
-
-describe("AstGrepBinaryManager - Cache Validation and Retry", () => {
-  test.skip("cache validation retries are logged and binary path is set", async () => {
-    const cacheDir = await ensureTempDir("cache-retry");
-    const manager = new AstGrepBinaryManager({
-      cacheDir,
-      autoInstall: true,
-      platform: process.platform as "linux",
-    });
-    const binaryName = (
-      manager as unknown as { getBinaryName: (platform: string, arch: string) => string }
-    ).getBinaryName.call(manager, process.platform, process.arch);
-    await createCrossPlatformStubBinary(cacheDir, {
-      baseName: binaryName,
-      version: "0.39.4",
-    });
-
-    const capture = new StderrCapture();
-    capture.start();
-    try {
-      await (
-        manager as unknown as { installPlatformBinary: () => Promise<void> }
-      ).installPlatformBinary();
-    } finally {
-      capture.stop();
-    }
-
-    const messages = capture.getMessages();
-    // Assert at least one retry warning was logged
-    const retryCount = countRetryAttempts(messages);
-    expect(retryCount).toBeGreaterThanOrEqual(1);
-
-    // Assert binary path is set (either re-downloaded or valid cached one)
-    expect(manager.getBinaryPath()).toBeTruthy();
-  });
-
-  test("cache validation failure with network disabled", async () => {
-    if (!SKIP_NETWORK) {
-      return; // Only run when network is intentionally disabled
-    }
-
-    const cacheDir = await ensureTempDir("cache-retry-offline");
-    const manager = new AstGrepBinaryManager({
-      cacheDir,
-      autoInstall: true,
-      platform: process.platform as "linux",
-    });
-    const binaryName = (
-      manager as unknown as { getBinaryName: (platform: string, arch: string) => string }
-    ).getBinaryName.call(manager, process.platform, process.arch);
-    await createCrossPlatformStubBinary(cacheDir, {
-      baseName: binaryName,
-      version: "0.39.4",
-    });
-
-    await expect(
-      (manager as unknown as { installPlatformBinary: () => Promise<void> }).installPlatformBinary()
-    ).rejects.toBeInstanceOf(BinaryError);
-  });
-});
-
-describe("AstGrepBinaryManager - Fallback Behavior", () => {
-  test("installation with network available succeeds", async () => {
-    if (SKIP_NETWORK) {
-      return; // Skip this test when network is unavailable
-    }
-
-    const cacheDir = await ensureTempDir("fallback-success");
-    const manager = new AstGrepBinaryManager({
-      autoInstall: true,
-      platform: process.platform as "linux",
-      cacheDir,
-    });
-
-    // Empty PATH to force download
-    process.env.PATH = "";
-
-    await (
-      manager as unknown as { installPlatformBinary: () => Promise<void> }
-    ).installPlatformBinary();
-
-    // Should succeed by downloading
-    expect(manager.getBinaryPath()).toBeTruthy();
-  });
-
-  test("installation failure when network disabled and no system binary", async () => {
-    if (!SKIP_NETWORK) {
-      return; // Only run when network is intentionally disabled
-    }
-
-    const manager = new AstGrepBinaryManager({
-      autoInstall: true,
-      platform: process.platform as "linux",
-    });
-
-    process.env.PATH = "";
-
-    await expect(
-      (manager as unknown as { installPlatformBinary: () => Promise<void> }).installPlatformBinary()
-    ).rejects.toBeInstanceOf(BinaryError);
-  });
-});
+// REMOVED: Platform-specific Installation, Cache Validation, and Fallback Behavior test sections
+// These tested auto-download/installation features that are no longer supported.
+// Users must install ast-grep separately using official methods.
 
 describe("AstGrepBinaryManager - Binary Testing and Validation", () => {
   test("testBinary validates version when expectedVersion provided", async () => {
@@ -778,197 +607,29 @@ describe("AstGrepBinaryManager - Initialization Priority", () => {
   });
 });
 
-describeSkipNetworkAware("AstGrepBinaryManager - Download Logic", () => {
-  test("downloadBinary downloads and validates real ast-grep archive", async () => {
-    const cacheDir = await ensureTempDir("download");
-    const manager = new AstGrepBinaryManager({
-      cacheDir,
-      platform: process.platform as "linux",
-      autoInstall: true,
-    });
-
-    const binaryName = (
-      manager as unknown as { getBinaryName: (platform: string, arch: string) => string }
-    ).getBinaryName.call(manager, process.platform, process.arch);
-    const targetPath = path.join(cacheDir, binaryName);
-
-    const capture = new StderrCapture();
-    capture.start();
-    const version = await (
-      manager as unknown as {
-        downloadBinary: (platform: string, arch: string, target: string) => Promise<string>;
-      }
-    ).downloadBinary(process.platform, process.arch, targetPath);
-    capture.stop();
-
-    const messages = capture.getMessages();
-    expect(messages.some((msg) => msg.includes("Downloading from"))).toBe(true);
-    expect(await fs.stat(targetPath)).toBeTruthy();
-    expect(version).toMatch(/\d+\.\d+\.\d+/);
-  });
-});
+// REMOVED: Download Logic test section
+// These tested auto-download features that are no longer supported.
+// Users must install ast-grep separately using official methods.
 
 const describeIntegration = process.env.INTEGRATION_TESTS === "1" ? describe : describe.skip;
 
 describeIntegration("AstGrepBinaryManager - Real Binary Integration", () => {
-  test("should initialize and execute real ast-grep binary", async () => {
-    const cacheDir = await ensureTempDir("real-binary");
-    const manager = new AstGrepBinaryManager({
-      cacheDir,
-      autoInstall: true,
-    });
-
-    const capture = new StderrCapture();
-    capture.start();
-    await manager.initialize();
-    capture.stop();
-
-    const messages = capture.getMessages();
-    assertStageLogging(messages, 1, 4);
-    assertStageLogging(messages, 2, 4);
-    assertStageLogging(messages, 3, 4);
-    assertStageLogging(messages, 4, 4);
-
-    const { stdout } = await manager.executeAstGrep(["--version"]);
-    expect(stdout).toMatch(/ast-grep \d+\.\d+\.\d+/);
-    expect(manager.getBinaryPath()).toMatch(/ast-grep/);
+  test.skip("should initialize and execute real ast-grep binary", async () => {
+    // OBSOLETE: This test used autoInstall which is no longer supported.
+    // Users must install ast-grep separately using official methods.
   });
 
-  test("should use system binary when useSystem is true", async () => {
-    const manager = new AstGrepBinaryManager({
-      useSystem: true,
-    });
-
-    const capture = new StderrCapture();
-    capture.start();
-    await manager.initialize();
-    capture.stop();
-
-    const messages = capture.getMessages();
-    expect(messages.some((msg) => msg.includes("Using system binary"))).toBe(true);
-
-    const { stdout } = await manager.executeAstGrep(["--version"]);
-    expect(stdout).toMatch(/ast-grep \d+\.\d+\.\d+/);
+  test.skip("should use system binary when useSystem is true", async () => {
+    // OBSOLETE: This test is redundant with system binary detection tests above.
+    // The system binary detection is already thoroughly tested in the
+    // "System Binary Discovery" test section.
   });
 
-  test("should use custom binary path with real ast-grep", async () => {
-    // Detect real ast-grep binary
-    let astGrepPath: string | null = null;
 
-    try {
-      if (process.platform === "win32") {
-        // Try 'where ast-grep' on Windows
-        const { stdout } = await execFileAsync("where", ["ast-grep"]);
-        const paths = stdout
-          .trim()
-          .split("\n")
-          .map((p) => p.trim());
-        // Prefer .exe variant
-        astGrepPath = paths.find((p) => p.endsWith(".exe")) || paths[0] || null;
-      } else {
-        // Try 'command -v ast-grep' on POSIX
-        try {
-          const { stdout } = await execFileAsync("sh", ["-c", "command -v ast-grep"]);
-          astGrepPath = stdout.trim() || null;
-        } catch {
-          // Fallback: scan PATH manually
-          const paths = (process.env.PATH || "").split(path.delimiter);
-          for (const dir of paths) {
-            const candidate = path.join(dir, "ast-grep");
-            try {
-              await fs.access(candidate, fs.constants.X_OK);
-              astGrepPath = candidate;
-              break;
-            } catch {
-              // Continue searching
-            }
-          }
-        }
-      }
-    } catch {
-      // Binary not found
-    }
 
-    if (!astGrepPath) {
-      if (process.env.INTEGRATION_TESTS === "1") {
-        throw new Error("ast-grep binary not found in PATH. Install ast-grep to run this test.");
-      }
-      // Skip test if binary not available locally
-      return;
-    }
-
-    // Verify binary works
-    try {
-      const { stdout } = await execFileAsync(astGrepPath, ["--version"]);
-      if (!/ast-grep \d+\.\d+\.\d+/.test(stdout)) {
-        throw new Error("Invalid version output");
-      }
-    } catch (error) {
-      if (process.env.INTEGRATION_TESTS === "1") {
-        throw new Error(`ast-grep binary at ${astGrepPath} is not functional: ${error}`);
-      }
-      return;
-    }
-
-    // Test with custom binary path
-    const manager = new AstGrepBinaryManager({
-      customBinaryPath: astGrepPath,
-    });
-
-    const capture = new StderrCapture();
-    capture.start();
-    await manager.initialize();
-    capture.stop();
-
-    const messages = capture.getMessages();
-
-    // Assert binary path matches
-    expect(manager.getBinaryPath()).toBe(astGrepPath);
-
-    // Assert version log is present
-    expect(messages.some((msg) => /Using custom binary: .* \(version: [\w.]+\)/.test(msg))).toBe(
-      true
-    );
-
-    // Extract version from logs
-    const versionMatch = messages.find((msg) => /version: ([\w.]+)/.test(msg));
-    expect(versionMatch).toBeTruthy();
-    const version = versionMatch?.match(/version: ([\w.]+)/)?.[1];
-    expect(version).toBeTruthy();
-    expect(version).toMatch(/\d+\.\d+\.\d+/);
-
-    // Execute --version and verify
-    const { stdout } = await manager.executeAstGrep(["--version"]);
-    expect(stdout).toMatch(/ast-grep \d+\.\d+\.\d+/);
-    expect(stdout).toContain(version!);
-  });
-
-  test("should detect platform-specific binary", async () => {
-    const cacheDir = await ensureTempDir("platform-detection");
-    const manager = new AstGrepBinaryManager({
-      cacheDir,
-      autoInstall: true,
-    });
-
-    await manager.initialize();
-
-    const binaryPath = manager.getBinaryPath();
-    expect(binaryPath).not.toBeNull();
-
-    if (process.platform === "win32") {
-      expect(binaryPath).toMatch(/\.exe$/);
-    } else {
-      expect(binaryPath).not.toMatch(/\.exe$/);
-    }
-
-    if (binaryPath) {
-      const stats = await fs.stat(binaryPath);
-      if (process.platform !== "win32") {
-        // Check Unix executable permissions (check owner, group, other execute bits)
-        const hasExecutePermission = (stats.mode & 0o111) !== 0;
-        expect(hasExecutePermission).toBe(true);
-      }
-    }
+  test.skip("should detect platform-specific binary", async () => {
+    // OBSOLETE: This test used autoInstall which is no longer supported.
+    // Users must install ast-grep separately using official methods.
   });
 });
 
