@@ -12,6 +12,7 @@ interface SearchParams {
   context?: number;
   maxMatches?: number;
   timeoutMs?: number;
+  verbose?: boolean;
 }
 
 interface MatchEntry {
@@ -102,6 +103,16 @@ export class SearchTool {
       });
     }
 
+    const verboseValidation = ParameterValidator.validateVerbose(params.verbose);
+    if (!verboseValidation.valid) {
+      throw new ValidationError(verboseValidation.errors.join("; "), {
+        errors: verboseValidation.errors,
+      });
+    }
+
+    // Set default verbose value to true
+    const isVerbose = params.verbose !== false;
+
     // Normalize language aliases when provided
     const normalizeLang = (lang: string) => {
       const map: Record<string, string> = {
@@ -171,14 +182,14 @@ export class SearchTool {
       if (!pathsProvided) {
         const workspaceRoot = this.workspaceManager.getWorkspaceRoot();
         const home = process.env.HOME || process.env.USERPROFILE || "";
-        
+
         // Prevent scanning from home directory or common user directories
         if (home && path.resolve(workspaceRoot) === path.resolve(home)) {
           throw new ValidationError(
             `Cannot scan from home directory without explicit paths. Please provide absolute paths to specific directories.`
           );
         }
-        
+
         const normalizedRoot = workspaceRoot.toLowerCase();
         const userDirPatterns = [
           /[/\\]downloads[/\\]?$/i,
@@ -190,7 +201,7 @@ export class SearchTool {
             `Cannot scan from user directory without explicit paths. Please provide absolute paths to specific directories.`
           );
         }
-        
+
         console.error(
           `Warning: No paths provided, scanning entire workspace from root: ${workspaceRoot}`
         );
@@ -266,7 +277,7 @@ export class SearchTool {
 
     try {
       const result = await this.binaryManager.executeAstGrep(args, executeOptions);
-      return this.parseResults(result.stdout, params);
+      return this.parseResults(result.stdout, params, isVerbose);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       throw new ExecutionError(`Search failed: ${message}`);
@@ -291,7 +302,11 @@ export class SearchTool {
     return filePath;
   }
 
-  private parseResults(stdout: string, params: SearchParams): SearchResult {
+  private parseResults(
+    stdout: string,
+    params: SearchParams,
+    isVerbose: boolean = true
+  ): SearchResult {
     const matches: MatchEntry[] = [];
     let skippedLines = 0;
 
@@ -342,6 +357,21 @@ export class SearchTool {
     }
 
     const maxMatches = params.maxMatches || 100;
+
+    // If not verbose, return only a simplified result with summary
+    if (!isVerbose) {
+      return {
+        matches: [], // Empty matches array for non-verbose mode
+        skippedLines,
+        summary: {
+          totalMatches: matches.length,
+          truncated: matches.length > maxMatches,
+          skippedLines,
+          executionTime: 0, // We don't need precise timing
+        },
+      };
+    }
+
     return {
       matches: matches.slice(0, maxMatches),
       skippedLines,
@@ -373,24 +403,32 @@ WHEN TO USE:
 • Search specific code snippets for testing
 
 WHEN NOT TO USE:
-• Need metavariable constraints (e.g., $VAR must match "foo") → Use ast_run_rule with constraints
+• Need metavariable constraints (e.g., $VAR must match "foo") → Use ast_run_rule with where constraints
 • Want to provide fix suggestions → Use ast_run_rule with fix parameter
 • Need severity levels or categorization → Use ast_run_rule
+• Need structural rules (kind/has/inside) → Use ast_run_rule with rule parameter
 • Text-based search (grep strings) → Use grep/ripgrep tools instead
 • Simple string matching without code structure → Use grep/ripgrep (faster and more appropriate)
-• Control flow analysis (complex if/with/try blocks) → Limited support, may require structural rules
+• Control flow analysis requiring stopBy behavior → Use ast_run_rule with relational rules
 • Regex-only matching → ast-grep requires AST patterns, use grep with regex instead
 
 PATTERN SYNTAX:
 • $VAR - Single AST node (expression, identifier, statement)
+  - Examples: $ARG, $NAME, $VALUE, $OBJ, $PROP
+  - Naming: UPPER_CASE or UPPER_SNAKE_CASE recommended
 • $$$NAME - Multiple nodes, MUST be named (bare $$$ rejected)
+  - Examples: $$$ARGS, $$$PARAMS, $$$BODY, $$$ITEMS
+  - Matches: zero or more AST nodes in sequence
+  - Always requires a name (bare $$$ will be rejected)
 • $_ - Anonymous match (use when you don't need to reference it)
+  - Example: foo($_, $_, $_) matches three arguments without capturing
 
 Metavariable rules:
 1. Must be complete AST nodes: Use "$OBJ.$PROP", not "$VAR.prop"
-2. Multi-node must be named: "$$$ARGS" not "$$$"
+2. Multi-node must be named: "$$$ARGS" not "$$$" (validation error if unnamed)
 3. Language-specific: JavaScript patterns won't work in Python
 4. Match structure, not text: "foo" won't match "foobar"
+5. Case-sensitive: $VAR and $var are different metavariables
 
 COMMON PATTERNS:
 
@@ -559,6 +597,11 @@ CLI: ast-grep run --pattern "console.log($ARG)" --lang js --context 2 --json=str
             type: "number",
             description:
               "Timeout in milliseconds (1000-300000). Default: 30000. Increase for large repos.",
+          },
+          verbose: {
+            type: "boolean",
+            description:
+              "Control output verbosity. Default: true. When false, returns simplified summary without detailed match information. Useful in CLI to prevent excessive output.",
           },
         },
         required: ["pattern"],

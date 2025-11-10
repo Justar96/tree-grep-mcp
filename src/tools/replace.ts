@@ -12,6 +12,7 @@ interface ReplaceParams {
   code?: string;
   dryRun?: boolean;
   timeoutMs?: number;
+  verbose?: boolean;
 }
 
 interface ChangeEntry {
@@ -128,6 +129,16 @@ export class ReplaceTool {
       });
     }
 
+    const verboseValidation = ParameterValidator.validateVerbose(params.verbose);
+    if (!verboseValidation.valid) {
+      throw new ValidationError(verboseValidation.errors.join("; "), {
+        errors: verboseValidation.errors,
+      });
+    }
+
+    // Set default verbose value to true
+    const isVerbose = params.verbose !== false;
+
     const codeValidation = ParameterValidator.validateCode(params.code);
     if (!codeValidation.valid) {
       throw new ValidationError(codeValidation.errors.join("; "), {
@@ -202,14 +213,14 @@ export class ReplaceTool {
       if (!pathsProvided) {
         const workspaceRoot = this.workspaceManager.getWorkspaceRoot();
         const home = process.env.HOME || process.env.USERPROFILE || "";
-        
+
         // Prevent scanning from home directory or common user directories
         if (home && path.resolve(workspaceRoot) === path.resolve(home)) {
           throw new ValidationError(
             `Cannot replace in home directory without explicit paths. Please provide absolute paths to specific directories.`
           );
         }
-        
+
         const normalizedRoot = workspaceRoot.toLowerCase();
         const userDirPatterns = [
           /[/\\]downloads[/\\]?$/i,
@@ -221,7 +232,7 @@ export class ReplaceTool {
             `Cannot replace in user directory without explicit paths. Please provide absolute paths to specific directories.`
           );
         }
-        
+
         console.error(
           `Warning: No paths provided, replacing in entire workspace from root: ${workspaceRoot}`
         );
@@ -275,7 +286,7 @@ export class ReplaceTool {
 
     try {
       const result = await this.binaryManager.executeAstGrep(args, executeOptions);
-      return this.parseResults(result.stdout, params, warnings);
+      return this.parseResults(result.stdout, params, warnings, isVerbose);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       throw new ExecutionError(`Replace failed: ${message}`);
@@ -300,7 +311,12 @@ export class ReplaceTool {
     return filePath;
   }
 
-  private parseResults(stdout: string, params: ReplaceParams, warnings?: string[]): ReplaceResult {
+  private parseResults(
+    stdout: string,
+    params: ReplaceParams,
+    warnings?: string[],
+    isVerbose: boolean = true
+  ): ReplaceResult {
     const changes: ChangeEntry[] = [];
 
     if (!stdout.trim()) {
@@ -386,6 +402,21 @@ export class ReplaceTool {
       );
     }
 
+    // If not verbose, return only a simplified result with summary
+    if (!isVerbose) {
+      return {
+        changes: [], // Empty changes array for non-verbose mode
+        skippedLines,
+        summary: {
+          totalChanges: changes.reduce((sum, c) => sum + c.matches, 0),
+          filesModified: changes.length,
+          skippedLines,
+          dryRun: params.dryRun !== false,
+          ...(warnings && warnings.length > 0 ? { warnings } : {}),
+        },
+      };
+    }
+
     return {
       changes,
       skippedLines,
@@ -422,10 +453,11 @@ WHEN TO USE:
 
 WHEN NOT TO USE:
 • Simple text replacement → Use sed for faster, simpler text substitution
-• Need conditional replacements based on metavariable values → Use ast_run_rule with constraints
+• Need conditional replacements based on metavariable values → Use ast_run_rule with where constraints and fix
 • Adding new elements without existing structure → Manual editing required
 • Regex-based find and replace → Use sed or your editor's find/replace
 • Control flow refactoring (complex if/with/try blocks) → Limited support, may require manual editing
+• Need to filter replacements by metavariable content → Use ast_run_rule with constraints
 
 METAVARIABLE CONSISTENCY:
 Pattern and replacement must use consistent metavariable names:
@@ -434,6 +466,8 @@ Pattern and replacement must use consistent metavariable names:
 • Can reorder, duplicate, or omit metavariables in replacement
 • $_ (anonymous) can appear in pattern but NOT in replacement
 • Multi-node metavariables MUST be named (bare $$$ rejected)
+• Case-sensitive: $VAR and $var are different metavariables
+• Unused pattern metavariables generate warnings (may be intentional)
 
 COMMON REPLACEMENT PATTERNS:
 
@@ -611,6 +645,11 @@ CLI: ast-grep run --pattern "var $N = $V" --rewrite "const $N = $V" /workspace/s
             type: "number",
             description:
               "Timeout in milliseconds (1000-300000). Default: 60000. Increase for large repos.",
+          },
+          verbose: {
+            type: "boolean",
+            description:
+              "Control output verbosity. Default: true. When false, returns simplified summary without detailed change information. Useful in CLI to prevent excessive output.",
           },
         },
         required: ["pattern", "replacement"],

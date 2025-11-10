@@ -41,7 +41,7 @@ For more installation options, see the [official ast-grep installation guide](ht
 
 ## Tools
 
-This server exposes three tools for structural code operations:
+This server exposes four tools for structural code operations:
 
 ### ast_search
 
@@ -60,6 +60,9 @@ Search code using AST pattern matching (structural search, not text search).
 - `context` (optional): Number of context lines (0-100, default: 3)
 - `maxMatches` (optional): Maximum results (1-10000, default: 100)
 - `timeoutMs` (optional): Timeout in milliseconds (1000-300000, default: 30000)
+- `verbose` (optional): Control output verbosity (default: `true`)
+  - When `false`, returns only summary information without detailed match data
+  - Useful in CLI to prevent excessive output
 
 **Example:**
 ```json
@@ -82,6 +85,9 @@ Perform structural code replacements using AST pattern matching.
 - `language` (optional): Programming language (required for inline code)
 - `dryRun` (optional): Preview without modifying files (default: `true`)
 - `timeoutMs` (optional): Timeout in milliseconds (1000-300000, default: 60000)
+- `verbose` (optional): Control output verbosity (default: `true`)
+  - When `false`, returns only summary information without detailed change data
+  - Useful in CLI to prevent excessive output
 
 **Example:**
 ```json
@@ -98,22 +104,29 @@ Perform structural code replacements using AST pattern matching.
 
 ### ast_run_rule
 
-Generate and execute ast-grep YAML rules with constraints and fix suggestions.
+Generate and execute ast-grep YAML rules with constraints and fix suggestions. Supports both simple patterns and complex structural rules.
 
 **Parameters:**
 - `id` (required): Unique rule identifier in kebab-case
 - `language` (required): Programming language
-- `pattern` (required): AST pattern to match
+- `pattern` (optional): Simple AST pattern string (use either `pattern` OR `rule`, not both)
+- `rule` (optional): Complex structural rule object with kind/has/inside/all/any/not (use either `pattern` OR `rule`, not both)
 - `message` (optional): Human-readable issue description
 - `severity` (optional): Issue severity (`error`, `warning`, `info`, default: `warning`)
 - `where` (optional): Array of constraints on metavariables
   - `metavariable`: Name without `$` prefix
   - `regex`: Regular expression to match content
   - `equals`: Exact string to match content
+  - `not_regex`: Exclude matches with regex pattern
+  - `not_equals`: Exclude exact matches
+  - `kind`: Match specific AST node type (e.g., 'identifier', 'string_literal')
 - `fix` (optional): Fix template using pattern metavariables
 - `code` (optional): Inline code to scan (requires `language`)
 - `paths` (optional): Array of file/directory paths
 - `timeoutMs` (optional): Timeout in milliseconds (1000-300000, default: 30000)
+- `verbose` (optional): Control output verbosity (default: `true`)
+  - When `false`, returns only summary information without detailed finding data
+  - Useful in CLI to prevent excessive output
 
 **Example:**
 ```json
@@ -140,6 +153,97 @@ Generate and execute ast-grep YAML rules with constraints and fix suggestions.
 }
 ```
 
+<<<<<<< Updated upstream
+**Example with structural rule (IMPORTANT: always use `stopBy: "end"` for relational rules):**
+```json
+{
+  "id": "async-function-with-await",
+  "language": "javascript",
+  "rule": {
+    "kind": "function_declaration",
+    "has": {
+      "pattern": "await $EXPR",
+      "stopBy": "end"
+    }
+  },
+  "message": "Function contains await expression"
+}
+```
+
+### ast_explain_pattern
+
+Debug and understand AST patterns by showing metavariable captures, AST node kinds, and helpful suggestions. Perfect for pattern development and troubleshooting.
+
+**Parameters:**
+- `pattern` (required): AST pattern with metavariables
+- `code` (required): Inline code to test the pattern against
+- `language` (required): Programming language
+- `showAst` (optional): Include AST debug output (default: `false`)
+- `timeoutMs` (optional): Timeout in milliseconds (1000-300000, default: 10000)
+=======
+### ast_explain_pattern
+
+Debug and understand AST patterns by showing metavariable captures, AST node kinds, and helpful suggestions.
+
+**Parameters:**
+- `pattern` (required): AST pattern with metavariables
+- `code` (required): Code snippet to test pattern against
+- `language` (required): Programming language for the code snippet
+- `showAst` (optional): Show AST debug output (default: `false`)
+- `timeoutMs` (optional): Timeout in milliseconds (1000-300000, default: 10000)
+- `verbose` (optional): Control output verbosity (default: `true`)
+  - When `false`, returns only match status without detailed metavariable data
+  - Useful in CLI to prevent excessive output
+>>>>>>> Stashed changes
+
+**Example:**
+```json
+{
+  "pattern": "console.log($ARG)",
+<<<<<<< Updated upstream
+  "code": "console.log('hello');",
+=======
+  "code": "console.log('hello')",
+>>>>>>> Stashed changes
+  "language": "javascript"
+}
+```
+
+<<<<<<< Updated upstream
+**Output:**
+```json
+{
+  "matched": true,
+  "metavariables": {
+    "ARG": {
+      "value": "'hello'",
+      "line": 1,
+      "column": 12
+    }
+  },
+  "astNodes": ["call_expression", "string"],
+  "suggestions": []
+}
+```
+
+**When to use:**
+- Developing new AST patterns - see what metavariables capture
+- Debugging pattern match failures - get actionable suggestions
+- Learning AST structure - see node kinds for your code
+- Testing patterns quickly before using in search/replace/scan
+
+=======
+**Example with AST debug:**
+```json
+{
+  "pattern": "function $NAME($$$PARAMS) { $$$BODY }",
+  "code": "function test(a, b) { return a + b; }",
+  "language": "javascript",
+  "showAst": true
+}
+```
+
+>>>>>>> Stashed changes
 ## Pattern Syntax
 
 Patterns use ast-grep's metavariable syntax for structural matching:
@@ -161,6 +265,15 @@ Patterns use ast-grep's metavariable syntax for structural matching:
 - Names must be UPPER_CASE or UPPER_SNAKE_CASE
 - Multi-node metavariables must have names
 - Replacement templates must use same metavariables as pattern
+
+**Structural Rules:**
+When using relational rules (`inside`, `has`, `precedes`, `follows`) in `ast_run_rule`, **always use `stopBy: "end"`** to ensure thorough searching:
+```yaml
+has:
+  pattern: await $EXPR
+  stopBy: end
+```
+Without `stopBy: "end"`, the search may terminate prematurely and miss matches.
 
 **Examples:**
 ```
@@ -276,6 +389,7 @@ bun run test:cli-mapping:coverage     # Coverage reporting
 | `ast_search` | `run`, `--pattern`, `--lang`, `--json=stream`, `--context`, `--stdin`, `<paths>` |
 | `ast_replace` | `run`, `--pattern`, `--rewrite`, `--lang`, `--update-all`, `--stdin`, `<paths>` |
 | `ast_run_rule` | `scan`, `--rule`, `--json=stream`, `<paths>` |
+| `ast_explain_pattern` | `run`, `--pattern`, `--lang`, `--json=stream`, `--stdin` |
 
 All flags verified against ast-grep documentation (AST_GREP_ALL_DOCUMENTS.md lines 355-814).
 

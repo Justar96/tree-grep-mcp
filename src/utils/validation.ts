@@ -277,20 +277,20 @@ export class PatternValidator {
   private static detectSimpleTextSearch(pattern: string): string | undefined {
     // Check if pattern has no metavariables
     const hasMetavariables = /\$+[A-Z_][A-Z0-9_]*/.test(pattern);
-    
+
     // Pattern with only string literals (no code structure)
     const isOnlyStringLiteral = /^["'`][^"'`]*["'`]$/.test(pattern.trim());
     if (isOnlyStringLiteral) {
       return (
         `Pattern is a string literal without code structure. ` +
-        `Use grep for string searches: grep "${pattern.replace(/["'`]/g, '')}" ` +
+        `Use grep for string searches: grep "${pattern.replace(/["'`]/g, "")}" ` +
         `ast-grep is for matching code patterns, not string content.`
       );
     }
-    
+
     // Check if pattern has structural elements (excluding quotes for string detection)
     const hasStructuralElements = /[(){}\[\]<>]/.test(pattern);
-    
+
     // Simple string without metavariables or structure
     if (!hasMetavariables && !hasStructuralElements) {
       return (
@@ -300,7 +300,7 @@ export class PatternValidator {
         `Use ast-grep only when you need to match code structure, not plain text.`
       );
     }
-    
+
     return undefined;
   }
 
@@ -829,6 +829,25 @@ export class ParameterValidator {
       const mb = (bytes / (1024 * 1024)).toFixed(2);
       errors.push(
         `code parameter cannot exceed 1MB (1,048,576 bytes). Received: ${bytes} bytes (${kb}KB / ${mb}MB). Consider using file paths instead of inline code for large code snippets.`
+      );
+    }
+
+    return { valid: errors.length === 0, errors };
+  }
+
+  /**
+   * Validate verbose parameter
+   */
+  static validateVerbose(verbose: unknown): ValidationResult {
+    const errors: string[] = [];
+
+    if (verbose === undefined || verbose === null) {
+      return { valid: true, errors: [] };
+    }
+
+    if (typeof verbose !== "boolean") {
+      errors.push(
+        `verbose must be a boolean (true or false). Received type: ${typeof verbose}. Example: verbose: false`
       );
     }
 

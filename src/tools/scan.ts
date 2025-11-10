@@ -34,6 +34,7 @@ interface ScanParams {
   paths?: string[];
   code?: string;
   timeoutMs?: number;
+  verbose?: boolean;
 }
 
 interface FindingLocation {
@@ -158,7 +159,7 @@ export class ScanTool {
         if (constraint.kind !== undefined && typeof constraint.kind !== "string") {
           throw new ValidationError(`where[${i}].kind must be a string`);
         }
-        
+
         // Early validation for kind format if present
         if (constraint.kind !== undefined && typeof constraint.kind === "string") {
           const kindValidation = ParameterValidator.validateConstraintKind(constraint.kind);
@@ -307,6 +308,16 @@ export class ScanTool {
       });
     }
 
+    const verboseValidation = ParameterValidator.validateVerbose(params.verbose);
+    if (!verboseValidation.valid) {
+      throw new ValidationError(verboseValidation.errors.join("; "), {
+        errors: verboseValidation.errors,
+      });
+    }
+
+    // Set default verbose value to true
+    const isVerbose = params.verbose !== false;
+
     const codeValidation = ParameterValidator.validateCode(params.code);
     if (!codeValidation.valid) {
       throw new ValidationError(codeValidation.errors.join("; "), {
@@ -362,10 +373,22 @@ export class ScanTool {
           }
 
           // Validate constraint has at least one operator
-          const hasRegex = constraint.hasOwnProperty("regex") && typeof constraint.regex === "string" && constraint.regex.trim().length > 0;
-          const hasEquals = constraint.hasOwnProperty("equals") && typeof constraint.equals === "string" && constraint.equals.trim().length > 0;
-          const hasNotRegex = constraint.hasOwnProperty("not_regex") && typeof constraint.not_regex === "string" && constraint.not_regex.trim().length > 0;
-          const hasNotEquals = constraint.hasOwnProperty("not_equals") && typeof constraint.not_equals === "string" && constraint.not_equals.trim().length > 0;
+          const hasRegex =
+            constraint.hasOwnProperty("regex") &&
+            typeof constraint.regex === "string" &&
+            constraint.regex.trim().length > 0;
+          const hasEquals =
+            constraint.hasOwnProperty("equals") &&
+            typeof constraint.equals === "string" &&
+            constraint.equals.trim().length > 0;
+          const hasNotRegex =
+            constraint.hasOwnProperty("not_regex") &&
+            typeof constraint.not_regex === "string" &&
+            constraint.not_regex.trim().length > 0;
+          const hasNotEquals =
+            constraint.hasOwnProperty("not_equals") &&
+            typeof constraint.not_equals === "string" &&
+            constraint.not_equals.trim().length > 0;
 
           if (!hasRegex && !hasEquals && !hasNotRegex && !hasNotEquals) {
             throw new ValidationError(
@@ -402,14 +425,18 @@ export class ScanTool {
     // For simple pattern-only rules without constraints/fix, use 'run' mode
     // Note: run mode doesn't support constraints or fix, so use scan mode if those are present
     const useRunMode = params.pattern && !params.rule && !params.where && !params.fix;
-    
+
     // Generate YAML rule (only needed for scan mode)
-    const yaml = useRunMode ? "" : this.buildYaml({ ...params, language: normalizeLang(params.language) });
+    const yaml = useRunMode
+      ? ""
+      : this.buildYaml({ ...params, language: normalizeLang(params.language) });
 
     // Create temporary rule file with unique name (only for scan mode)
     const tempDir = os.tmpdir();
     const randomSuffix = Math.random().toString(36).substring(2, 15);
-    const rulesFile = useRunMode ? "" : path.join(tempDir, `rule-${Date.now()}-${randomSuffix}.yml`);
+    const rulesFile = useRunMode
+      ? ""
+      : path.join(tempDir, `rule-${Date.now()}-${randomSuffix}.yml`);
 
     let tempCodeFileForCleanup: string | null = null;
     try {
@@ -421,7 +448,14 @@ export class ScanTool {
       const args: string[] = [];
       if (useRunMode) {
         // Use 'run' mode for simple patterns
-        args.push("run", "--pattern", params.pattern!.trim(), "--lang", normalizeLang(params.language), "--json=stream");
+        args.push(
+          "run",
+          "--pattern",
+          params.pattern!.trim(),
+          "--lang",
+          normalizeLang(params.language),
+          "--json=stream"
+        );
       } else {
         // Use 'scan' mode for structural rules
         args.push("scan", "--rule", PathValidator.normalizePath(rulesFile), "--json=stream");
@@ -462,14 +496,14 @@ export class ScanTool {
         if (!pathsProvided) {
           const workspaceRoot = this.workspaceManager.getWorkspaceRoot();
           const home = process.env.HOME || process.env.USERPROFILE || "";
-          
+
           // Prevent scanning from home directory or common user directories
           if (home && path.resolve(workspaceRoot) === path.resolve(home)) {
             throw new ValidationError(
               `Cannot scan from home directory without explicit paths. Please provide absolute paths to specific directories.`
             );
           }
-          
+
           const normalizedRoot = workspaceRoot.toLowerCase();
           const userDirPatterns = [
             /[/\\]downloads[/\\]?$/i,
@@ -481,7 +515,7 @@ export class ScanTool {
               `Cannot scan from user directory without explicit paths. Please provide absolute paths to specific directories.`
             );
           }
-          
+
           console.error(
             `Warning: No paths provided, scanning entire workspace from root: ${workspaceRoot}`
           );
@@ -542,8 +576,29 @@ export class ScanTool {
 
       const { findings, skippedLines } = this.parseFindings(result.stdout);
 
+      // Create result object based on verbose mode
+      if (!isVerbose) {
+        return {
+          yaml: useRunMode
+            ? `# Pattern-only rule (using run mode)\npattern: ${params.pattern}\nlanguage: ${normalizeLang(params.language)}`
+            : yaml,
+          skippedLines,
+          scan: {
+            findings: [], // Empty findings array for non-verbose mode
+            summary: {
+              totalFindings: findings.length,
+              errors: findings.filter((f) => f.severity === "error").length,
+              warnings: findings.filter((f) => f.severity === "warning").length,
+              skippedLines,
+            },
+          },
+        };
+      }
+
       const resultObj = {
-        yaml: useRunMode ? `# Pattern-only rule (using run mode)\npattern: ${params.pattern}\nlanguage: ${normalizeLang(params.language)}` : yaml,
+        yaml: useRunMode
+          ? `# Pattern-only rule (using run mode)\npattern: ${params.pattern}\nlanguage: ${normalizeLang(params.language)}`
+          : yaml,
         skippedLines,
         scan: {
           findings,
@@ -674,7 +729,7 @@ export class ScanTool {
         }
 
         lines.push(`  ${constraint.metavariable}:`);
-        
+
         // Output positive constraints (at most one due to mutual exclusivity validation)
         if (hasRegex && constraint.regex) {
           lines.push(`    regex: ${YamlValidator.escapeYamlString(constraint.regex)}`);
@@ -683,7 +738,7 @@ export class ScanTool {
           const escaped = trimmed.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
           lines.push(`    regex: ${YamlValidator.escapeYamlString("^" + escaped + "$")}`);
         }
-        
+
         // Output negative constraints with nested not: structure (at most one due to mutual exclusivity)
         if (hasNotRegex && constraint.not_regex) {
           lines.push("    not:");
@@ -694,7 +749,7 @@ export class ScanTool {
           lines.push("    not:");
           lines.push(`      regex: ${YamlValidator.escapeYamlString("^" + escaped + "$")}`);
         }
-        
+
         // Output kind constraint (can be combined with either positive or negative operator)
         if (hasKind && constraint.kind) {
           lines.push(`    kind: ${YamlValidator.escapeYamlString(constraint.kind)}`);
@@ -1062,7 +1117,12 @@ Structural rules enable advanced matching beyond simple patterns:
 
 2. Relational Rules - Match based on relationships (inside, has, precedes, follows):
    { rule: { kind: "function_declaration", has: { pattern: "await $E", stopBy: "end" } } }
-   Matches functions containing await. IMPORTANT: Use stopBy: "end" for relational rules.
+   Matches functions containing await.
+
+   **CRITICAL: Always use stopBy: "end" for relational rules (inside, has, precedes, follows)**
+   - Without stopBy: "end", search stops at nearest non-matching node (may miss matches)
+   - With stopBy: "end", search continues to root (inside) or leaf (has) nodes
+   - Default behavior (stopBy: "neighbor") often insufficient for thorough matching
 
 3. Pattern Objects - Disambiguate with selector/context/strictness:
    { rule: { pattern: { selector: "type_parameters", context: "function $F<$T>()" } } }
@@ -1074,10 +1134,17 @@ Structural rules enable advanced matching beyond simple patterns:
 
 METAVARIABLE RULES:
 • $VAR - Single node, must be complete AST node ($OBJ.$PROP not $VAR.prop)
+  - Examples: $ARG, $NAME, $VALUE, $OBJ, $PROP
+  - Naming: UPPER_CASE or UPPER_SNAKE_CASE recommended
 • $$$NAME - Multiple nodes, must be named (bare $$$ rejected)
+  - Examples: $$$ARGS, $$$PARAMS, $$$BODY, $$$ITEMS
+  - Matches: zero or more AST nodes in sequence
+  - Always requires a name (bare $$$ will be rejected with validation error)
 • $_ - Anonymous match (cannot reference in constraints/fix)
+  - Use when you don't need to reference the match
 • All metavariables in constraints/fix must exist in pattern
 • Multi-node metavariables must always be named
+• Case-sensitive: $VAR and $var are different metavariables
 
 CONSTRAINT EXAMPLES:
 
@@ -1156,10 +1223,17 @@ If rule execution fails, check these common issues:
 
 7. Empty scan.findings array (no matches)
    → Rule is valid but matched nothing (not an error)
+   → **If using relational rules, add stopBy: "end" to ensure thorough search**
    → Test with inline code first to verify rule logic
    → Check pattern syntax matches language AST
+   → Try simpler pattern first, then add complexity
 
-8. Timeout errors
+8. Relational rule not matching expected code
+   → **Add stopBy: "end" to relational rule (inside/has/precedes/follows)**
+   → Default stopBy: "neighbor" only searches immediate surrounding nodes
+   → Example: { has: { pattern: "await $E", stopBy: "end" } }
+
+9. Timeout errors
    → Increase timeoutMs (default: 30000ms, max: 300000ms)
    → Narrow paths to specific directories
    → Simplify pattern or constraints
@@ -1208,13 +1282,14 @@ CONSTRAINT RULES:
 • kind values must be lowercase with underscores (e.g., function_declaration)
 
 BEST PRACTICES:
+• **ALWAYS use stopBy: "end" for relational rules** (inside, has, precedes, follows)
 • Use for code quality enforcement and architectural analysis
 • Test rules on inline code before scanning large codebases
 • Start with simple patterns, add constraints to narrow matches
 • Use structural rules (kind/has/inside) for complex matching
-• Always use stopBy: "end" for relational rules (inside/has)
 • Specify language for better parsing and validation
 • Break complex rules into smaller, composable utility rules
+• When debugging, if relational rules don't match, add stopBy: "end" first
 
 LIMITATIONS:
 • Paths must be within workspace root (security constraint)
@@ -1278,23 +1353,28 @@ CLI: ast-grep scan --rule <temp-rule.yml> --json=stream /workspace/src/`,
                 },
                 regex: {
                   type: "string",
-                  description: "Regex pattern to match metavariable content. Mutually exclusive with 'equals'.",
+                  description:
+                    "Regex pattern to match metavariable content. Mutually exclusive with 'equals'.",
                 },
                 equals: {
                   type: "string",
-                  description: "Exact string to match metavariable content. Mutually exclusive with 'regex'.",
+                  description:
+                    "Exact string to match metavariable content. Mutually exclusive with 'regex'.",
                 },
                 not_regex: {
                   type: "string",
-                  description: "Exclude matches with regex pattern. Generates 'not: { regex: ... }' in YAML. Mutually exclusive with 'not_equals'.",
+                  description:
+                    "Exclude matches with regex pattern. Generates 'not: { regex: ... }' in YAML. Mutually exclusive with 'not_equals'.",
                 },
                 not_equals: {
                   type: "string",
-                  description: "Exclude exact matches. Generates 'not: { regex: ^value$ }' in YAML. Mutually exclusive with 'not_regex'.",
+                  description:
+                    "Exclude exact matches. Generates 'not: { regex: ^value$ }' in YAML. Mutually exclusive with 'not_regex'.",
                 },
                 kind: {
                   type: "string",
-                  description: "Match specific AST node type (e.g., 'string_literal', 'function_declaration'). Must be lowercase with underscores. Can be combined with any positive or negative operator.",
+                  description:
+                    "Match specific AST node type (e.g., 'string_literal', 'function_declaration'). Must be lowercase with underscores. Can be combined with any positive or negative operator.",
                 },
               },
               required: ["metavariable"],
@@ -1321,6 +1401,11 @@ CLI: ast-grep scan --rule <temp-rule.yml> --json=stream /workspace/src/`,
             type: "number",
             description:
               "Timeout in milliseconds (1000-300000). Default: 30000. Increase for large repos.",
+          },
+          verbose: {
+            type: "boolean",
+            description:
+              "Control output verbosity. Default: true. When false, returns simplified summary without detailed finding information. Useful in CLI to prevent excessive output.",
           },
         },
         required: ["id", "language"],

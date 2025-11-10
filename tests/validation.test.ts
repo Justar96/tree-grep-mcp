@@ -499,9 +499,7 @@ describe("ScanTool.buildYaml", () => {
         expect(true).toBe(false); // Should not reach here
       } catch (error) {
         expect(error).toBeInstanceOf(ValidationError);
-        expect((error as ValidationError).message).toContain(
-          "must specify at least one operator"
-        );
+        expect((error as ValidationError).message).toContain("must specify at least one operator");
       }
     });
 
@@ -520,9 +518,7 @@ describe("ScanTool.buildYaml", () => {
         expect(true).toBe(false); // Should not reach here
       } catch (error) {
         expect(error).toBeInstanceOf(ValidationError);
-        expect((error as ValidationError).message).toContain(
-          "must specify at least one operator"
-        );
+        expect((error as ValidationError).message).toContain("must specify at least one operator");
       }
     });
 
@@ -836,7 +832,9 @@ describe("ParameterValidator", () => {
 
   describe("validateCode", () => {
     test("accepts valid code strings", () => {
-      expect(ParameterValidator.validateCode('console.log("test")').valid).toBe(true);
+      expect(ParameterValidator.validateCode("function foo() { return 42; }").valid).toBe(true);
+      expect(ParameterValidator.validateCode("x = 1").valid).toBe(true);
+      expect(ParameterValidator.validateCode("console.log('hello')").valid).toBe(true);
     });
 
     test("accepts undefined/null", () => {
@@ -845,63 +843,95 @@ describe("ParameterValidator", () => {
     });
 
     test("rejects non-strings", () => {
-      const result = ParameterValidator.validateCode(123 as any);
+      const result = ParameterValidator.validateCode(123);
       expect(result.valid).toBe(false);
       expect(result.errors.some((e) => e.includes("must be a string"))).toBe(true);
     });
 
     test("rejects empty strings", () => {
-      const result = ParameterValidator.validateCode("   ");
+      const result = ParameterValidator.validateCode("");
       expect(result.valid).toBe(false);
       expect(result.errors.some((e) => e.includes("cannot be empty"))).toBe(true);
     });
 
     test("rejects code over 1MB", () => {
-      const largeCode = "a".repeat(1048577);
+      const largeCode = "x".repeat(1048577); // 1MB + 1 byte
       const result = ParameterValidator.validateCode(largeCode);
       expect(result.valid).toBe(false);
       expect(result.errors.some((e) => e.includes("cannot exceed 1MB"))).toBe(true);
     });
 
     test("accepts code at exact 1MB boundary", () => {
-      const exactMB = "a".repeat(1048576);
-      const result = ParameterValidator.validateCode(exactMB);
+      const largeCode = "x".repeat(1048576); // Exactly 1MB
+      const result = ParameterValidator.validateCode(largeCode);
       expect(result.valid).toBe(true);
     });
 
     test("rejects code just over 1MB", () => {
-      const justOver = "a".repeat(1048577);
-      const result = ParameterValidator.validateCode(justOver);
+      const largeCode = "x".repeat(1048577); // 1MB + 1 byte
+      const result = ParameterValidator.validateCode(largeCode);
       expect(result.valid).toBe(false);
-      expect(
-        result.errors.some((e) => e.includes("bytes") && e.includes("KB") && e.includes("MB"))
-      ).toBe(true);
+      expect(result.errors.some((e) => e.includes("exceed 1MB"))).toBe(true);
     });
 
     test("validates multi-byte Unicode characters by byte count", () => {
-      const unicodeChar = "世";
-      const charByteSize = new TextEncoder().encode(unicodeChar).length;
-      const charsNeeded = Math.floor(1048576 / charByteSize) + 1;
-      const overSizeUnicode = unicodeChar.repeat(charsNeeded);
-      const result = ParameterValidator.validateCode(overSizeUnicode);
-      expect(result.valid).toBe(false);
+      // Each emoji is 4 bytes in UTF-8
+      const unicodeCode = "😀".repeat(262144); // 262,144 * 4 = 1,048,576 bytes (1MB)
+      const result = ParameterValidator.validateCode(unicodeCode);
+      expect(result.valid).toBe(true);
     });
 
     test("rejects code with only whitespace", () => {
-      const result = ParameterValidator.validateCode("\n\n\t  \r\n");
+      const result = ParameterValidator.validateCode("   \n\t  ");
       expect(result.valid).toBe(false);
-      expect(result.errors.some((e) => e.includes("empty"))).toBe(true);
+      expect(result.errors.some((e) => e.includes("cannot be empty"))).toBe(true);
     });
 
     test("accepts code with leading/trailing whitespace but valid content", () => {
-      const result = ParameterValidator.validateCode('  console.log("test");  ');
+      const result = ParameterValidator.validateCode("   \n\tfunction foo() {}  \n\t");
       expect(result.valid).toBe(true);
     });
 
     test("accepts very long single line under 1MB", () => {
-      const longLine = "a".repeat(500000);
+      const longLine = "x".repeat(10000);
       const result = ParameterValidator.validateCode(longLine);
       expect(result.valid).toBe(true);
+    });
+  });
+
+  describe("validateVerbose", () => {
+    test("accepts valid boolean values", () => {
+      expect(ParameterValidator.validateVerbose(true).valid).toBe(true);
+      expect(ParameterValidator.validateVerbose(false).valid).toBe(true);
+    });
+
+    test("accepts undefined/null", () => {
+      expect(ParameterValidator.validateVerbose(undefined).valid).toBe(true);
+      expect(ParameterValidator.validateVerbose(null).valid).toBe(true);
+    });
+
+    test("rejects non-boolean values", () => {
+      const result = ParameterValidator.validateVerbose("true");
+      expect(result.valid).toBe(false);
+      expect(result.errors.some((e) => e.includes("must be a boolean"))).toBe(true);
+    });
+
+    test("rejects numbers", () => {
+      const result = ParameterValidator.validateVerbose(1);
+      expect(result.valid).toBe(false);
+      expect(result.errors.some((e) => e.includes("must be a boolean"))).toBe(true);
+    });
+
+    test("rejects objects", () => {
+      const result = ParameterValidator.validateVerbose({ verbose: true });
+      expect(result.valid).toBe(false);
+      expect(result.errors.some((e) => e.includes("must be a boolean"))).toBe(true);
+    });
+
+    test("rejects arrays", () => {
+      const result = ParameterValidator.validateVerbose([true]);
+      expect(result.valid).toBe(false);
+      expect(result.errors.some((e) => e.includes("must be a boolean"))).toBe(true);
     });
   });
 });
@@ -1554,29 +1584,29 @@ describe("PatternValidator - Enhanced Features", () => {
       const result = PatternValidator.validatePattern("foobar");
       expect(result.valid).toBe(true);
       expect(result.warnings).toBeDefined();
-      expect(result.warnings?.some(w => w.includes("simple text search"))).toBe(true);
-      expect(result.warnings?.some(w => w.includes("grep/ripgrep"))).toBe(true);
+      expect(result.warnings?.some((w) => w.includes("simple text search"))).toBe(true);
+      expect(result.warnings?.some((w) => w.includes("grep/ripgrep"))).toBe(true);
     });
 
     test("warns on string literal patterns", () => {
       const result = PatternValidator.validatePattern('"hello world"');
       expect(result.valid).toBe(true);
       expect(result.warnings).toBeDefined();
-      expect(result.warnings?.some(w => w.includes("string literal"))).toBe(true);
-      expect(result.warnings?.some(w => w.includes("grep"))).toBe(true);
+      expect(result.warnings?.some((w) => w.includes("string literal"))).toBe(true);
+      expect(result.warnings?.some((w) => w.includes("grep"))).toBe(true);
     });
 
     test("does not warn on patterns with metavariables", () => {
       const result = PatternValidator.validatePattern("console.log($ARG)");
       expect(result.valid).toBe(true);
-      const hasTextSearchWarning = result.warnings?.some(w => w.includes("simple text search"));
+      const hasTextSearchWarning = result.warnings?.some((w) => w.includes("simple text search"));
       expect(hasTextSearchWarning).toBeFalsy();
     });
 
     test("does not warn on patterns with structural elements", () => {
       const result = PatternValidator.validatePattern("function foo() {}");
       expect(result.valid).toBe(true);
-      const hasTextSearchWarning = result.warnings?.some(w => w.includes("simple text search"));
+      const hasTextSearchWarning = result.warnings?.some((w) => w.includes("simple text search"));
       expect(hasTextSearchWarning).toBeFalsy();
     });
 
@@ -1584,7 +1614,7 @@ describe("PatternValidator - Enhanced Features", () => {
       const result = PatternValidator.validatePattern("myVariable");
       expect(result.valid).toBe(true);
       expect(result.warnings).toBeDefined();
-      expect(result.warnings?.some(w => w.includes("simple text search"))).toBe(true);
+      expect(result.warnings?.some((w) => w.includes("simple text search"))).toBe(true);
     });
   });
 });

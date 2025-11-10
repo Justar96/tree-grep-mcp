@@ -9,6 +9,7 @@ interface ExplainParams {
   language: string;
   showAst?: boolean;
   timeoutMs?: number;
+  verbose?: boolean;
 }
 
 interface MetavariableCapture {
@@ -82,6 +83,17 @@ export class ExplainTool {
       });
     }
 
+    // Validate verbose if provided
+    const verboseValidation = ParameterValidator.validateVerbose(params.verbose);
+    if (!verboseValidation.valid) {
+      throw new ValidationError(verboseValidation.errors.join("; "), {
+        errors: verboseValidation.errors,
+      });
+    }
+
+    // Set default verbose value to true
+    const isVerbose = params.verbose !== false;
+
     // Normalize language aliases
     const normalizeLang = (lang: string) => {
       const map: Record<string, string> = {
@@ -111,7 +123,15 @@ export class ExplainTool {
     const normalizedLang = normalizeLang(params.language);
 
     // Build CLI command
-    const args = ["run", "--pattern", params.pattern.trim(), "--lang", normalizedLang, "--json=stream", "--stdin"];
+    const args = [
+      "run",
+      "--pattern",
+      params.pattern.trim(),
+      "--lang",
+      normalizedLang,
+      "--json=stream",
+      "--stdin",
+    ];
 
     const executeOptions = {
       cwd: this.workspaceManager.getWorkspaceRoot(),
@@ -121,23 +141,41 @@ export class ExplainTool {
 
     try {
       const result = await this.binaryManager.executeAstGrep(args, executeOptions);
-      
+
       // Get AST debug output if requested
       let astDebugOutput: string | undefined;
       if (params.showAst) {
-        const astArgs = ["run", "--pattern", params.pattern.trim(), "--lang", normalizedLang, "--debug-query=ast", "--stdin"];
+        const astArgs = [
+          "run",
+          "--pattern",
+          params.pattern.trim(),
+          "--lang",
+          normalizedLang,
+          "--debug-query=ast",
+          "--stdin",
+        ];
         const astResult = await this.binaryManager.executeAstGrep(astArgs, executeOptions);
         astDebugOutput = astResult.stdout || astResult.stderr;
       }
-      
-      return this.parseExplainOutput(result.stdout, params.showAst || false, astDebugOutput);
+
+      return this.parseExplainOutput(
+        result.stdout,
+        params.showAst || false,
+        astDebugOutput,
+        isVerbose
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       throw new ExecutionError(`Pattern explanation failed: ${message}`);
     }
   }
 
-  private parseExplainOutput(stdout: string, showAst: boolean, astDebugOutput?: string): ExplainResult {
+  private parseExplainOutput(
+    stdout: string,
+    showAst: boolean,
+    astDebugOutput?: string,
+    isVerbose: boolean = true
+  ): ExplainResult {
     const metavariables: Record<string, MetavariableCapture> = {};
     const astNodes = new Set<string>();
     let matched = false;
@@ -156,23 +194,29 @@ export class ExplainTool {
     const lines = stdout.trim().split("\n");
     for (const line of lines) {
       if (!line.trim()) continue;
-      
+
       try {
         const json = JSON.parse(line) as {
           text?: string;
           metaVariables?: {
-            single?: Record<string, {
-              text?: string;
-              range?: {
-                start?: { line?: number; column?: number };
-              };
-            }>;
-            multi?: Record<string, Array<{
-              text?: string;
-              range?: {
-                start?: { line?: number; column?: number };
-              };
-            }>>;
+            single?: Record<
+              string,
+              {
+                text?: string;
+                range?: {
+                  start?: { line?: number; column?: number };
+                };
+              }
+            >;
+            multi?: Record<
+              string,
+              Array<{
+                text?: string;
+                range?: {
+                  start?: { line?: number; column?: number };
+                };
+              }>
+            >;
           };
           kind?: string;
         };
@@ -196,7 +240,7 @@ export class ExplainTool {
         // Extract multi metavariables (concatenate all matched nodes)
         if (json.metaVariables?.multi) {
           for (const [name, captures] of Object.entries(json.metaVariables.multi)) {
-            const combinedText = captures.map(c => c.text || "").join(" ");
+            const combinedText = captures.map((c) => c.text || "").join(" ");
             const firstCapture = captures[0];
             metavariables[name] = {
               value: combinedText,
@@ -222,6 +266,23 @@ export class ExplainTool {
       console.error(
         `Warning: Skipped ${skippedLines} malformed result lines out of ${lines.length} total lines`
       );
+    }
+
+    // If not verbose, return only a simplified result
+    if (!isVerbose) {
+      const simplifiedResult: ExplainResult = {
+        matched,
+        metavariables: {}, // Empty metavariables for non-verbose mode
+        astNodes: Array.from(astNodes),
+        suggestions: this.generateSuggestions(matched),
+      };
+
+      // Add AST field if requested
+      if (showAst && astDebugOutput) {
+        simplifiedResult.ast = astDebugOutput;
+      }
+
+      return simplifiedResult;
     }
 
     const result: ExplainResult = {
@@ -274,21 +335,32 @@ WHEN TO USE:
 • Testing patterns quickly before using in search/replace/scan
 
 WHEN NOT TO USE:
-• Searching files for patterns → Use ast_search
-• Applying fixes to code → Use ast_replace
-• Running rules with constraints → Use ast_run_rule
-• Production code scanning → Use ast_run_rule
+• Searching files for patterns → Use ast_search for file/directory searches
+• Applying fixes to code → Use ast_replace for actual replacements
+• Running rules with constraints → Use ast_run_rule for filtering by metavariable content
+• Production code scanning → Use ast_run_rule for code quality checks
+• Need structural rules (kind/has/inside) → Use ast_run_rule with rule parameter
 
 PATTERN SYNTAX:
 • $VAR - Single AST node (expression, identifier, statement)
+  - Examples: $ARG, $NAME, $VALUE, $OBJ, $PROP
+  - Naming: UPPER_CASE or UPPER_SNAKE_CASE recommended
+  - Captured in metavariables output with exact text and position
 • $$$NAME - Multiple nodes, MUST be named (bare $$$ rejected)
+  - Examples: $$$ARGS, $$$PARAMS, $$$BODY, $$$ITEMS
+  - Matches: zero or more AST nodes in sequence
+  - Always requires a name (bare $$$ will be rejected)
+  - Captured as concatenated text in metavariables output
 • $_ - Anonymous match (use when you don't need to reference it)
+  - Example: foo($_, $_, $_) matches three arguments without capturing
+  - Will NOT appear in metavariables output
 
 Metavariable rules:
 1. Must be complete AST nodes: Use "$OBJ.$PROP", not "$VAR.prop"
-2. Multi-node must be named: "$$$ARGS" not "$$$"
+2. Multi-node must be named: "$$$ARGS" not "$$$" (validation error if unnamed)
 3. Language-specific: JavaScript patterns won't work in Python
 4. Match structure, not text: "foo" won't match "foobar"
+5. Case-sensitive: $VAR and $var are different metavariables
 
 COMMON PATTERNS:
 
@@ -389,7 +461,8 @@ CLI: ast-grep run --pattern "console.log($ARG)" --lang js --json=stream --stdin
           },
           code: {
             type: "string",
-            description: "Inline code to test the pattern against. Required for pattern explanation.",
+            description:
+              "Inline code to test the pattern against. Required for pattern explanation.",
           },
           language: {
             type: "string",
@@ -398,11 +471,18 @@ CLI: ast-grep run --pattern "console.log($ARG)" --lang js --json=stream --stdin
           },
           showAst: {
             type: "boolean",
-            description: "Include AST debug output in result. When true, executes a second ast-grep call with --debug-query=ast to show the pattern's AST structure. Default: false.",
+            description:
+              "Include AST debug output in result. When true, executes a second ast-grep call with --debug-query=ast to show the pattern's AST structure. Default: false.",
           },
           timeoutMs: {
             type: "number",
-            description: "Timeout in milliseconds (1000-300000). Default: 10000. Increase for complex patterns or slow systems.",
+            description:
+              "Timeout in milliseconds (1000-300000). Default: 10000. Increase for complex patterns or slow systems.",
+          },
+          verbose: {
+            type: "boolean",
+            description:
+              "Control output verbosity. Default: true. When false, returns simplified summary without detailed metavariable captures. Useful in CLI to prevent excessive output.",
           },
         },
         required: ["pattern", "code", "language"],
